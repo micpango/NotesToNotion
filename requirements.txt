@@ -1,0 +1,8 @@
+rumps
+watchdog
+requests
+openai
+keyring
+pyinstaller
+pillow
+pillow-heif
