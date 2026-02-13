@@ -1,0 +1,4 @@
+.venv/
+NotesToNotion.spec
+build/
+dist/
