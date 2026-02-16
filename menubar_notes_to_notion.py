@@ -35,7 +35,7 @@ import json
 import re
 import time
 import subprocess
-from typing import Optional
+from typing import Optional, List
 
 import rumps
 import keyring
@@ -189,9 +189,28 @@ class NotionClient:
             "Content-Type": "application/json",
         }
 
-    def append_children(self, block_id: str, children: list) -> None:
+    def list_children_ids(self, block_id: str, page_size: int = 50) -> List[str]:
+        """
+        Returns child block IDs in order (top to bottom).
+        """
+        url = f"{self.base}/blocks/{block_id}/children?page_size={page_size}"
+        r = requests.get(url, headers=self._headers())
+        if r.status_code >= 300:
+            raise RuntimeError(f"Notion list children error {r.status_code}: {r.text}")
+        data = r.json()
+        results = data.get("results", [])
+        return [b.get("id") for b in results if b.get("id")]
+
+    def append_children(self, block_id: str, children: list, after_block_id: Optional[str] = None) -> None:
+        """
+        Appends children. If after_block_id is provided, inserts *after* that block.
+        """
         url = f"{self.base}/blocks/{block_id}/children"
-        r = requests.patch(url, headers=self._headers(), data=json.dumps({"children": children}))
+        payload = {"children": children}
+        if after_block_id:
+            payload["after"] = after_block_id
+
+        r = requests.patch(url, headers=self._headers(), data=json.dumps(payload))
         if r.status_code >= 300:
             raise RuntimeError(f"Notion error {r.status_code}: {r.text}")
 
@@ -278,9 +297,22 @@ class Pipeline:
                         "to_do": {"rich_text": rt_text(text), "checked": bool(task.get("done", False))}
                     })
 
+            # ✅ Fix 1: numbered notes become numbered list items
             for note in (t.get("notes") or []):
                 note = str(note).strip()
-                if note:
+                if not note:
+                    continue
+
+                m = re.match(r"^(\d+)\.\s+(.*)", note)
+                if m:
+                    text = m.group(2).strip()
+                    if text:
+                        blocks.append({
+                            "object": "block",
+                            "type": "numbered_list_item",
+                            "numbered_list_item": {"rich_text": rt_text(text)}
+                        })
+                else:
                     blocks.append({
                         "object": "block",
                         "type": "bulleted_list_item",
@@ -309,10 +341,21 @@ class Pipeline:
 
         blocks = self.notion_blocks(parsed, path.name)
 
+        # ✅ Fix 2: Insert newest right after the page title/top block (not at bottom)
+        try:
+            child_ids = self.notion.list_children_ids(self.page_id, page_size=50)
+            after_id = child_ids[0] if child_ids else None
+        except Exception as e:
+            after_id = None
+            log(f"Could not fetch children for insert-after; fallback to append: {repr(e)}")
+
         # chunk to avoid payload limits
         chunk = 60
+
+        # Insert first chunk after top block (page title area),
+        # then insert subsequent chunks after the same anchor to keep our chunk order.
         for i in range(0, len(blocks), chunk):
-            self.notion.append_children(self.page_id, blocks[i:i + chunk])
+            self.notion.append_children(self.page_id, blocks[i:i + chunk], after_block_id=after_id)
             time.sleep(0.1)
 
         self.mark(fp, path.name)
