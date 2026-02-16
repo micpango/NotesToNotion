@@ -16,4 +16,4 @@ pyinstaller --noconfirm --clean --windowed \
 
 echo
 echo "✅ Built: dist/NotesToNotion.app"
-echo "Drag it into /Applications"
+echo "Drag it into /Applications (or run ./reinstall.sh)"

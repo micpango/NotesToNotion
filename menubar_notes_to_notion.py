@@ -1,11 +1,40 @@
+# ------------------------------
+# NotesToNotion v0.2.1
+# ------------------------------
+# IMPORTANT: Log init must happen before other imports to catch startup issues.
+
+import os
+import sys
+from pathlib import Path
+from datetime import datetime
+
+APP_NAME = "NotesToNotion"
+APP_VERSION = "v0.2.1"
+
+LOG_DIR = Path.home() / "Library" / "Application Support" / "NotesToNotion"
+LOG_DIR.mkdir(parents=True, exist_ok=True)
+LOG_FILE = LOG_DIR / "app.log"
+
+def log(msg: str):
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        with open(LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(f"[{ts}] {msg}\n")
+    except Exception:
+        pass
+
+log("=== App starting ===")
+log(f"Python: {sys.version}")
+log(f"Executable: {sys.executable}")
+
+# ------------------------------
+# Normal imports (may crash in bundles; logging above helps)
+# ------------------------------
 import io
 import json
-import os
 import re
 import time
 import subprocess
-from pathlib import Path
-from datetime import datetime
 from typing import Optional
 
 import rumps
@@ -16,13 +45,20 @@ from watchdog.events import FileSystemEventHandler
 from openai import OpenAI
 
 from PIL import Image
-import pillow_heif
-pillow_heif.register_heif_opener()
 
-APP_NAME = "NotesToNotion"
+# HEIC support is best-effort; do not crash app if pillow_heif fails in bundle.
+try:
+    import pillow_heif
+    pillow_heif.register_heif_opener()
+    HEIC_OK = True
+    log("pillow_heif OK")
+except Exception as e:
+    HEIC_OK = False
+    log(f"pillow_heif NOT available: {repr(e)}")
+
 SERVICE_NAME = "com.notes-to-notion"
 
-CONFIG_DIR = Path.home() / "Library" / "Application Support" / "NotesToNotion"
+CONFIG_DIR = LOG_DIR
 CONFIG_PATH = CONFIG_DIR / "config.json"
 STATE_PATH = CONFIG_DIR / "processed.json"
 
@@ -56,10 +92,6 @@ Output ONLY valid JSON:
 """.strip()
 
 
-def ensure_dirs():
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-
-
 def load_config() -> dict:
     if not CONFIG_PATH.exists():
         return {}
@@ -67,7 +99,7 @@ def load_config() -> dict:
 
 
 def save_config(cfg: dict) -> None:
-    ensure_dirs()
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     CONFIG_PATH.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), "utf-8")
 
 
@@ -81,7 +113,7 @@ def state_load() -> dict:
 
 
 def state_save(state: dict) -> None:
-    ensure_dirs()
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     STATE_PATH.write_text(json.dumps(state, ensure_ascii=False, indent=2), "utf-8")
 
 
@@ -108,7 +140,18 @@ def extract_notion_page_id(input_str: str) -> str:
 
 
 def image_to_jpeg_bytes(path: Path) -> bytes:
-    img = Image.open(path)
+    """
+    Convert image to JPEG bytes.
+    If HEIC can't be opened via pillow_heif in a bundle, fallback to macOS `sips`.
+    """
+    suffix = path.suffix.lower()
+    if suffix == ".heic" and not HEIC_OK:
+        tmp = Path("/tmp") / (path.stem + ".jpg")
+        subprocess.run(["sips", "-s", "format", "jpeg", str(path), "--out", str(tmp)], check=True)
+        img = Image.open(tmp)
+    else:
+        img = Image.open(path)
+
     if img.mode in ("RGBA", "P"):
         img = img.convert("RGB")
     buf = io.BytesIO()
@@ -178,6 +221,7 @@ class Pipeline:
         data_url = jpeg_to_data_url(jpeg)
 
         self.status_cb(f"Transcribing: {path.name}")
+        log(f"Transcribing: {path}")
 
         resp = self.client.responses.create(
             model=self.model,
@@ -190,7 +234,9 @@ class Pipeline:
             }],
         )
 
-        out = resp.output_text().strip()
+        ot = getattr(resp, "output_text", "")
+        out = ot() if callable(ot) else ot
+        out = (out or "").strip()
         start = out.find("{")
         end = out.rfind("}")
         if start == -1 or end == -1 or end <= start:
@@ -219,7 +265,6 @@ class Pipeline:
         blocks.append({"object": "block", "type": "divider", "divider": {}})
 
         topics = parsed.get("topics") or [{"title": "General", "tasks": [], "notes": [], "questions": []}]
-
         for t in topics:
             title = (t.get("title") or "General").strip() or "General"
             blocks.append({"object": "block", "type": "heading_3", "heading_3": {"rich_text": rt_text(title)}})
@@ -255,13 +300,16 @@ class Pipeline:
         fp = self.fingerprint(path)
         if self.seen(fp):
             self.status_cb(f"Already processed: {path.name}")
+            log(f"Already processed: {path}")
             return
 
         parsed = self.transcribe(path)
         self.status_cb(f"Appending: {path.name}")
+        log(f"Appending: {path}")
 
         blocks = self.notion_blocks(parsed, path.name)
 
+        # chunk to avoid payload limits
         chunk = 60
         for i in range(0, len(blocks), chunk):
             self.notion.append_children(self.page_id, blocks[i:i + chunk])
@@ -269,6 +317,7 @@ class Pipeline:
 
         self.mark(fp, path.name)
         self.status_cb(f"Done: {path.name}")
+        log(f"Done: {path}")
 
 
 class FolderHandler(FileSystemEventHandler):
@@ -308,6 +357,7 @@ class FolderHandler(FileSystemEventHandler):
             path.replace(self.proc / path.name)
         except Exception as e:
             self.status_cb(f"Error: {e}")
+            log(f"ERROR processing {path}: {repr(e)}")
             try:
                 path.replace(self.fail / path.name)
             except Exception:
@@ -316,6 +366,7 @@ class FolderHandler(FileSystemEventHandler):
 
 class NotesMenuApp(rumps.App):
     def __init__(self):
+        # Disable default Quit to avoid duplicate Quit entries.
         super().__init__(APP_NAME, quit_button=None)
         self.title = "📷📝"
 
@@ -328,6 +379,8 @@ class NotesMenuApp(rumps.App):
         self.mi_status = rumps.MenuItem("Status…", callback=self.show_status)
         self.mi_open_watch = rumps.MenuItem("Open Watch Folder", callback=self.open_watch_folder)
         self.mi_open_failed = rumps.MenuItem("Open _failed", callback=self.open_failed)
+        self.mi_open_log = rumps.MenuItem("Open Log", callback=self.open_log)
+        self.mi_about = rumps.MenuItem(f"About ({APP_VERSION})", callback=self.about)
         self.mi_quit = rumps.MenuItem("Quit", callback=self.quit_app)
 
         self.menu = [
@@ -338,24 +391,22 @@ class NotesMenuApp(rumps.App):
             self.mi_status,
             self.mi_open_watch,
             self.mi_open_failed,
+            self.mi_open_log,
             None,
+            self.mi_about,
             self.mi_quit,
         ]
 
         self._refresh_menu_states()
+        log("Menu initialized")
 
     def status_cb(self, msg: str):
         self.status_msg = msg
-        # In a packaged app, print() is not helpful. Keep status in UI.
-        # You can also add notifications later if you want.
-        self._refresh_menu_states()
+        log(f"STATUS: {msg}")
 
     def _refresh_menu_states(self):
         running = self.observer is not None
-        self.mi_start.set_callback(self.start_watching)
-        self.mi_stop.set_callback(self.stop_watching)
         self.mi_start.state = 1 if running else 0
-        self.mi_stop.state = 0
 
     def _ensure_config(self) -> Optional[dict]:
         cfg = load_config()
@@ -411,6 +462,7 @@ class NotesMenuApp(rumps.App):
         try:
             page_id = extract_notion_page_id(nurl.text)
         except Exception as e:
+            log(f"Bad Notion URL: {repr(e)}")
             rumps.alert("Bad Notion URL", str(e))
             return
 
@@ -426,6 +478,7 @@ class NotesMenuApp(rumps.App):
             keychain_set("OPENAI_API_KEY", openai.text.strip())
 
         self.status_msg = "Saved setup."
+        log("Setup saved")
         rumps.alert("Saved", "Setup saved. Now click Start Watching.")
 
     def start_watching(self, _):
@@ -459,9 +512,11 @@ class NotesMenuApp(rumps.App):
             self.observer.start()
 
             self.status_msg = f"Watching: {watch}"
+            log(f"Watching: {watch}")
             rumps.notification(APP_NAME, "Started", str(watch))
         except Exception as e:
             self.observer = None
+            log(f"Could not start watcher: {repr(e)}")
             rumps.alert("Could not start", str(e))
         finally:
             self._refresh_menu_states()
@@ -477,6 +532,7 @@ class NotesMenuApp(rumps.App):
         finally:
             self.observer = None
             self.status_msg = "Stopped."
+            log("Stopped watcher")
             rumps.notification(APP_NAME, "Stopped", "")
             self._refresh_menu_states()
 
@@ -495,14 +551,34 @@ class NotesMenuApp(rumps.App):
         if p:
             subprocess.run(["open", str(Path(p) / "_failed")])
 
+    def open_log(self, _):
+        subprocess.run(["open", str(LOG_FILE)])
+
+    def about(self, _):
+        cfg = load_config()
+        model = cfg.get("OPENAI_MODEL", "gpt-5.2")
+        msg = "\n".join([
+            f"{APP_NAME} {APP_VERSION}",
+            "",
+            f"Log: {LOG_FILE}",
+            f"Config: {CONFIG_PATH}",
+            f"Model: {model}",
+        ])
+        rumps.alert("About", msg)
+
     def quit_app(self, _):
         try:
             if self.observer is not None:
                 self.observer.stop()
                 self.observer.join(timeout=2)
         finally:
+            log("Quit")
             rumps.quit_application()
 
 
 if __name__ == "__main__":
-    NotesMenuApp().run()
+    try:
+        NotesMenuApp().run()
+    except Exception as e:
+        log(f"FATAL: {repr(e)}")
+        raise

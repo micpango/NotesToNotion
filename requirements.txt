@@ -6,3 +6,4 @@ keyring
 pyinstaller
 pillow
 pillow-heif
+urllib3<2
