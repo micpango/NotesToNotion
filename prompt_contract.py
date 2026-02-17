@@ -12,7 +12,7 @@ Line prefixes (must be first character on the line):
 
 Numbered lines:
 - "1. " / "2. " / "3. " ... at the start of a line = numbered note item.
-  Keep the full prefix ("1. ") in the text exactly as written so it can be rendered as a numbered list.
+  Keep the number prefix in the text (e.g. "1. ") so it can be rendered as a numbered list.
 
 Other:
 - no prefix = note

@@ -46,6 +46,9 @@ from openai import OpenAI
 
 from PIL import Image
 
+from prompt_contract import PROMPT
+from notion_format import build_notion_blocks
+
 # HEIC support is best-effort; do not crash app if pillow_heif fails in bundle.
 try:
     import pillow_heif
@@ -64,32 +67,6 @@ STATE_PATH = CONFIG_DIR / "processed.json"
 
 SUPPORTED_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".heic"}
 NOTION_VERSION = "2025-09-03"
-
-PROMPT = r"""
-You are transcribing handwritten notes from an image into structured data.
-
-Rules:
-- Underlined text = topic / agenda point
-- "." at start = task (done=false)
-- "x" at start = completed task (done=true)
-- "-" at start = note
-- "?" at start = question
-- no prefix = note
-Group items under the most recent topic; if none, topic is "General".
-Do not invent content. If unreadable, omit it.
-
-Output ONLY valid JSON:
-{
-  "topics": [
-    {
-      "title": "Topic name",
-      "tasks": [{"text":"...", "done": false}],
-      "notes": ["..."],
-      "questions": ["..."]
-    }
-  ]
-}
-""".strip()
 
 
 def load_config() -> dict:
@@ -164,19 +141,6 @@ def jpeg_to_data_url(b: bytes) -> str:
     return "data:image/jpeg;base64," + base64.b64encode(b).decode("utf-8")
 
 
-def date_mention_rich_text(dt: datetime):
-    # Notion date mention: ISO8601 with local timezone
-    iso = dt.astimezone().isoformat(timespec="minutes")
-    return [{
-        "type": "mention",
-        "mention": {"type": "date", "date": {"start": iso}}
-    }]
-
-
-def rt_text(s: str):
-    return [{"type": "text", "text": {"content": s}}]
-
-
 class NotionClient:
     def __init__(self, token: str):
         self.token = token
@@ -197,23 +161,14 @@ class NotionClient:
         }
 
     def list_children_ids(self, block_id: str, page_size: int = 50) -> List[str]:
-        """
-        Returns child block IDs in order (top to bottom).
-        """
         url = f"{self.base}/blocks/{block_id}/children?page_size={page_size}"
         r = requests.get(url, headers=self._headers_no_ct())
         if r.status_code >= 300:
             raise RuntimeError(f"Notion list children error {r.status_code}: {r.text}")
-        data = r.json()
-        results = data.get("results", [])
+        results = (r.json() or {}).get("results", [])
         return [b.get("id") for b in results if b.get("id")]
 
-    # ✅ NEW: deterministically insert after the page's first H1
     def find_first_h1_id(self, page_id: str, page_size: int = 50) -> Optional[str]:
-        """
-        Returns the id of the first heading_1 block among the page's top-level children.
-        If not found, returns None.
-        """
         url = f"{self.base}/blocks/{page_id}/children?page_size={page_size}"
         r = requests.get(url, headers=self._headers_no_ct())
         if r.status_code >= 300:
@@ -226,9 +181,6 @@ class NotionClient:
         return None
 
     def append_children(self, block_id: str, children: list, after_block_id: Optional[str] = None) -> None:
-        """
-        Appends children. If after_block_id is provided, inserts *after* that block.
-        """
         url = f"{self.base}/blocks/{block_id}/children"
         payload = {"children": children}
         if after_block_id:
@@ -255,28 +207,24 @@ class NotionClient:
 
     def send_file_upload(self, file_upload_id: str, filename: str, content_type: str, data: bytes) -> dict:
         url = f"{self.base}/file_uploads/{file_upload_id}/send"
-        files = {
-            "file": (filename, data, content_type),
-        }
+        files = {"file": (filename, data, content_type)}
         r = requests.post(url, headers=self._headers_no_ct(), files=files)
         if r.status_code >= 300:
             raise RuntimeError(f"Notion send file upload error {r.status_code}: {r.text}")
         return r.json()
 
     def upload_image_bytes(self, filename: str, data: bytes, content_type: str = "image/jpeg") -> str:
-        """
-        Uploads image bytes to Notion as a File Upload and returns file_upload_id.
-        """
         fu = self.create_file_upload(filename=filename, content_type=content_type, content_length=len(data))
         file_upload_id = fu.get("id")
         if not file_upload_id:
             raise RuntimeError("Notion file upload did not return an id.")
 
-        sent = self.send_file_upload(file_upload_id=file_upload_id, filename=filename, content_type=content_type, data=data)
-        status = (sent or {}).get("status")
-        if status not in (None, "uploaded"):
-            log(f"Notion upload status: {status}")
-
+        self.send_file_upload(
+            file_upload_id=file_upload_id,
+            filename=filename,
+            content_type=content_type,
+            data=data,
+        )
         return file_upload_id
 
 
@@ -327,84 +275,6 @@ class Pipeline:
             raise RuntimeError("Model did not return valid JSON.")
         return json.loads(out[start:end + 1])
 
-    def notion_blocks(self, parsed: dict, filename: str, image_file_upload_id: Optional[str]) -> list:
-        blocks = []
-        dt = datetime.now()
-
-        # Heading with Notion @date mention
-        blocks.append({
-            "object": "block",
-            "type": "heading_2",
-            "heading_2": {
-                "rich_text": date_mention_rich_text(dt) + rt_text(" — Handwritten notes")
-            }
-        })
-
-        # Attach image (as image block) if available
-        if image_file_upload_id:
-            blocks.append({
-                "object": "block",
-                "type": "image",
-                "image": {
-                    "caption": rt_text(f"Source image: {filename}"),
-                    "type": "file_upload",
-                    "file_upload": {"id": image_file_upload_id}
-                }
-            })
-
-        blocks.append({
-            "object": "block",
-            "type": "paragraph",
-            "paragraph": {"rich_text": rt_text(f"Source: {filename}")}
-        })
-
-        blocks.append({"object": "block", "type": "divider", "divider": {}})
-
-        topics = parsed.get("topics") or [{"title": "General", "tasks": [], "notes": [], "questions": []}]
-        for t in topics:
-            title = (t.get("title") or "General").strip() or "General"
-            blocks.append({"object": "block", "type": "heading_3", "heading_3": {"rich_text": rt_text(title)}})
-
-            for task in (t.get("tasks") or []):
-                text = (task.get("text") or "").strip()
-                if text:
-                    blocks.append({
-                        "object": "block",
-                        "type": "to_do",
-                        "to_do": {"rich_text": rt_text(text), "checked": bool(task.get("done", False))}
-                    })
-
-            # Numbered notes become numbered list items
-            for note in (t.get("notes") or []):
-                note = str(note).strip()
-                if not note:
-                    continue
-
-                m = re.match(r"^(\d+)\.\s+(.*)", note)
-                if m:
-                    text = m.group(2).strip()
-                    if text:
-                        blocks.append({
-                            "object": "block",
-                            "type": "numbered_list_item",
-                            "numbered_list_item": {"rich_text": rt_text(text)}
-                        })
-                else:
-                    blocks.append({
-                        "object": "block",
-                        "type": "bulleted_list_item",
-                        "bulleted_list_item": {"rich_text": rt_text(note)}
-                    })
-
-            for q in (t.get("questions") or []):
-                q = str(q).strip()
-                if q:
-                    blocks.append({"object": "block", "type": "toggle", "toggle": {"rich_text": rt_text(f"Q: {q}")}})
-
-            blocks.append({"object": "block", "type": "paragraph", "paragraph": {"rich_text": rt_text("")}})
-
-        return blocks
-
     def process(self, path: Path) -> None:
         fp = self.fingerprint(path)
         if self.seen(fp):
@@ -412,10 +282,9 @@ class Pipeline:
             log(f"Already processed: {path}")
             return
 
-        # Convert once, reuse for both OpenAI + Notion image attach
         jpeg_bytes = image_to_jpeg_bytes(path)
 
-        # 1) Upload image to Notion (so we can attach it)
+        # Upload image for attachment (best effort)
         image_file_upload_id = None
         try:
             self.status_cb(f"Uploading image: {path.name}")
@@ -424,27 +293,29 @@ class Pipeline:
             image_file_upload_id = self.notion.upload_image_bytes(
                 filename=upload_name,
                 data=jpeg_bytes,
-                content_type="image/jpeg"
+                content_type="image/jpeg",
             )
             log(f"Uploaded image file_upload_id: {image_file_upload_id}")
         except Exception as e:
             image_file_upload_id = None
             log(f"Image upload failed (continuing without attachment): {repr(e)}")
 
-        # 2) Transcribe
         parsed = self.transcribe_from_jpeg(jpeg_bytes, path.name)
 
-        # 3) Build blocks (including image if upload succeeded)
         self.status_cb(f"Appending: {path.name}")
         log(f"Appending: {path}")
 
-        blocks = self.notion_blocks(parsed, path.name, image_file_upload_id=image_file_upload_id)
+        # ✅ Single source of truth (unit-tested)
+        blocks = build_notion_blocks(
+            parsed=parsed,
+            filename=path.name,
+            image_upload_id=image_file_upload_id,
+            now=datetime.now(),
+        )
 
-        # ✅ NEW INSERT LOGIC: always insert right after first H1 on the page
+        # Insert after first H1
         try:
             after_id = self.notion.find_first_h1_id(self.page_id)
-
-            # Fallback if for some reason no H1 exists
             if not after_id:
                 child_ids = self.notion.list_children_ids(self.page_id, page_size=50)
                 after_id = child_ids[0] if child_ids else None
@@ -452,9 +323,7 @@ class Pipeline:
             after_id = None
             log(f"Could not resolve insert-after; fallback to append: {repr(e)}")
 
-        # chunk to avoid payload limits
         chunk = 60
-
         for i in range(0, len(blocks), chunk):
             self.notion.append_children(self.page_id, blocks[i:i + chunk], after_block_id=after_id)
             time.sleep(0.1)
@@ -510,7 +379,6 @@ class FolderHandler(FileSystemEventHandler):
 
 class NotesMenuApp(rumps.App):
     def __init__(self):
-        # Disable default Quit to avoid duplicate Quit entries.
         super().__init__(APP_NAME, quit_button=None)
         self.title = "📷📝"
 

@@ -1,4 +1,3 @@
-# notion_format.py
 from __future__ import annotations
 
 import re
@@ -49,6 +48,7 @@ def build_notion_blocks(
             }
         })
 
+    # NOTE: This "Source:" paragraph stays for now. (We remove it in step 2 you listed.)
     blocks.append({
         "object": "block",
         "type": "paragraph",
@@ -103,17 +103,21 @@ def build_notion_blocks(
                     "bulleted_list_item": {"rich_text": rt_text(note)}
                 })
 
-        # Questions -> toggle
+        # Questions -> ❓ callout (documentation, not actionable)
         for q in (t.get("questions") or []):
             q = str(q).strip()
             if not q:
                 continue
             blocks.append({
                 "object": "block",
-                "type": "toggle",
-                "toggle": {"rich_text": rt_text(f"Q: {q}")}
+                "type": "callout",
+                "callout": {
+                    "icon": {"emoji": "❓"},
+                    "rich_text": rt_text(q),
+                }
             })
 
+        # Spacer
         blocks.append({"object": "block", "type": "paragraph", "paragraph": {"rich_text": rt_text("")}})
 
     return blocks

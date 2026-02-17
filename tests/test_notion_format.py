@@ -1,4 +1,3 @@
-# tests/test_notion_format.py
 from datetime import datetime
 from notion_format import build_notion_blocks
 
@@ -52,7 +51,7 @@ def test_tasks_render_as_todo_blocks():
     assert todos[1]["to_do"]["checked"] is True
 
 
-def test_questions_render_as_toggle():
+def test_questions_render_as_callout_with_question_icon():
     parsed = {
         "topics": [{
             "title": "Test",
@@ -69,9 +68,10 @@ def test_questions_render_as_toggle():
         now=datetime(2026, 2, 16, 23, 19),
     )
 
-    toggles = [b for b in blocks if b.get("type") == "toggle"]
-    assert len(toggles) == 1
-    assert toggles[0]["toggle"]["rich_text"][0]["text"]["content"] == "Q: et spørsmål"
+    callouts = [b for b in blocks if b.get("type") == "callout"]
+    assert len(callouts) == 1
+    assert callouts[0]["callout"]["icon"] == {"emoji": "❓"}
+    assert callouts[0]["callout"]["rich_text"][0]["text"]["content"] == "et spørsmål"
 
 
 def test_image_block_included_when_upload_id_present():
