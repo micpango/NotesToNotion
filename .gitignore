@@ -1,5 +1,17 @@
-.venv/
-NotesToNotion.spec
+# Pytest / coverage
+.coverage
+.coverage.*
+htmlcov/
+.pytest_cache/
+
+# Python
+__pycache__/
+*.pyc
+
+# Build artifacts
 build/
 dist/
+*.spec
+
+.venv/
 .DS_Store
