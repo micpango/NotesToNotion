@@ -161,24 +161,63 @@ class NotionClient:
         }
 
     def list_children_ids(self, block_id: str, page_size: int = 50) -> List[str]:
-        url = f"{self.base}/blocks/{block_id}/children?page_size={page_size}"
-        r = requests.get(url, headers=self._headers_no_ct())
-        if r.status_code >= 300:
-            raise RuntimeError(f"Notion list children error {r.status_code}: {r.text}")
-        results = (r.json() or {}).get("results", [])
-        return [b.get("id") for b in results if b.get("id")]
+        """
+        Returns child block IDs in order (top to bottom), paginating until done.
+        """
+        ids: List[str] = []
+        cursor = None
+
+        while True:
+            url = f"{self.base}/blocks/{block_id}/children?page_size={page_size}"
+            if cursor:
+                url += f"&start_cursor={cursor}"
+
+            r = requests.get(url, headers=self._headers_no_ct())
+            if r.status_code >= 300:
+                raise RuntimeError(f"Notion list children error {r.status_code}: {r.text}")
+
+            data = r.json() or {}
+            results = data.get("results", []) or []
+            ids.extend([b.get("id") for b in results if b.get("id")])
+
+            if not data.get("has_more"):
+                break
+
+            cursor = data.get("next_cursor")
+            if not cursor:
+                break
+
+        return ids
 
     def find_first_h1_id(self, page_id: str, page_size: int = 50) -> Optional[str]:
-        url = f"{self.base}/blocks/{page_id}/children?page_size={page_size}"
-        r = requests.get(url, headers=self._headers_no_ct())
-        if r.status_code >= 300:
-            raise RuntimeError(f"Notion list children error {r.status_code}: {r.text}")
-        results = (r.json() or {}).get("results", [])
+        """
+        Returns the id of the first heading_1 block among the page's top-level children.
+        Paginates until found or no more results.
+        """
+        cursor = None
 
-        for b in results:
-            if b.get("type") == "heading_1":
-                return b.get("id")
-        return None
+        while True:
+            url = f"{self.base}/blocks/{page_id}/children?page_size={page_size}"
+            if cursor:
+                url += f"&start_cursor={cursor}"
+
+            r = requests.get(url, headers=self._headers_no_ct())
+            if r.status_code >= 300:
+                raise RuntimeError(f"Notion list children error {r.status_code}: {r.text}")
+
+            data = r.json() or {}
+            results = data.get("results", []) or []
+
+            for b in results:
+                if b.get("type") == "heading_1":
+                    return b.get("id")
+
+            if not data.get("has_more"):
+                return None
+
+            cursor = data.get("next_cursor")
+            if not cursor:
+                return None
 
     def append_children(self, block_id: str, children: list, after_block_id: Optional[str] = None) -> None:
         url = f"{self.base}/blocks/{block_id}/children"
