@@ -27,6 +27,10 @@ pyinstaller --noconfirm --clean --windowed \
   --icon "assets/icon.icns" \
   run.py
 
+# --- SIGN APP ---
+codesign --deep --force --sign "NotesToNotion Dev" \
+  dist/NotesToNotion.app
+
 echo
 echo "✅ Built: dist/NotesToNotion.app"
 echo "Drag it into /Applications (or run ./reinstall.sh)"
