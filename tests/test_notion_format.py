@@ -51,7 +51,7 @@ def test_tasks_render_as_todo_blocks():
     assert todos[1]["to_do"]["checked"] is True
 
 
-def test_questions_render_as_callout_with_question_icon():
+def test_questions_render_as_bullets_with_question_emoji():
     parsed = {
         "topics": [{
             "title": "Test",
@@ -68,13 +68,14 @@ def test_questions_render_as_callout_with_question_icon():
         now=datetime(2026, 2, 16, 23, 19),
     )
 
-    callouts = [b for b in blocks if b.get("type") == "callout"]
-    assert len(callouts) == 1
-    assert callouts[0]["callout"]["icon"] == {"emoji": "❓"}
-    assert callouts[0]["callout"]["rich_text"][0]["text"]["content"] == "et spørsmål"
+    bullets = [b for b in blocks if b.get("type") == "bulleted_list_item"]
+    assert any(
+        b["bulleted_list_item"]["rich_text"][0]["text"]["content"] == "❓ et spørsmål"
+        for b in bullets
+    )
 
 
-def test_image_block_included_when_upload_id_present():
+def test_image_block_included_when_upload_id_present_and_no_source_paragraph():
     parsed = {"topics": [{"title": "General", "tasks": [], "notes": ["note"], "questions": []}]}
 
     blocks = build_notion_blocks(
@@ -88,3 +89,35 @@ def test_image_block_included_when_upload_id_present():
     assert len(imgs) == 1
     assert imgs[0]["image"]["type"] == "file_upload"
     assert imgs[0]["image"]["file_upload"]["id"] == "UPLOAD123"
+
+    # Ensure we do NOT include "Source: ..." paragraph when image is attached
+    source_paras = [
+        b for b in blocks
+        if b.get("type") == "paragraph"
+        and "paragraph" in b
+        and b["paragraph"].get("rich_text")
+        and b["paragraph"]["rich_text"][0].get("type") == "text"
+        and b["paragraph"]["rich_text"][0]["text"]["content"].startswith("Source:")
+    ]
+    assert source_paras == []
+
+
+def test_source_paragraph_included_when_no_image_upload_id():
+    parsed = {"topics": [{"title": "General", "tasks": [], "notes": ["note"], "questions": []}]}
+
+    blocks = build_notion_blocks(
+        parsed,
+        filename="IMG_5.HEIC",
+        image_upload_id=None,
+        now=datetime(2026, 2, 16, 23, 19),
+    )
+
+    source_paras = [
+        b for b in blocks
+        if b.get("type") == "paragraph"
+        and "paragraph" in b
+        and b["paragraph"].get("rich_text")
+        and b["paragraph"]["rich_text"][0].get("type") == "text"
+        and b["paragraph"]["rich_text"][0]["text"]["content"] == "Source: IMG_5.HEIC"
+    ]
+    assert len(source_paras) == 1

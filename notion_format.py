@@ -103,18 +103,14 @@ def build_notion_blocks(
                     "bulleted_list_item": {"rich_text": rt_text(note)}
                 })
 
-        # Questions -> ❓ callout (documentation, not actionable)
         for q in (t.get("questions") or []):
             q = str(q).strip()
             if not q:
                 continue
             blocks.append({
                 "object": "block",
-                "type": "callout",
-                "callout": {
-                    "icon": {"emoji": "❓"},
-                    "rich_text": rt_text(q),
-                }
+                "type": "bulleted_list_item",
+                "bulleted_list_item": {"rich_text": rt_text(f"❓ {q}")}
             })
 
         # Spacer
