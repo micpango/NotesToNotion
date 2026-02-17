@@ -68,6 +68,25 @@ STATE_PATH = CONFIG_DIR / "processed.json"
 SUPPORTED_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".heic"}
 NOTION_VERSION = "2025-09-03"
 
+def list_pending_images(watch: Path) -> List[Path]:
+    """
+    List supported images in the watch folder root (not recursive), excluding hidden files
+    and excluding the _processed/_failed directories.
+    Returns sorted by mtime (oldest first) for deterministic batching.
+    """
+    pending: List[Path] = []
+    for p in watch.iterdir():
+        if p.is_dir():
+            continue
+        if p.name.startswith("."):
+            continue
+        if p.suffix.lower() not in SUPPORTED_EXTS:
+            continue
+        pending.append(p)
+
+    pending.sort(key=lambda x: (x.stat().st_mtime, x.name))
+    return pending
+
 
 def load_config() -> dict:
     if not CONFIG_PATH.exists():
@@ -219,7 +238,7 @@ class NotionClient:
             if not cursor:
                 return None
 
-    def append_children(self, block_id: str, children: list, after_block_id: Optional[str] = None) -> None:
+    def append_children(self, block_id: str, children: list, after_block_id: Optional[str] = None) -> dict:
         url = f"{self.base}/blocks/{block_id}/children"
         payload = {"children": children}
         if after_block_id:
@@ -228,6 +247,7 @@ class NotionClient:
         r = requests.patch(url, headers=self._headers_json(), data=json.dumps(payload))
         if r.status_code >= 300:
             raise RuntimeError(f"Notion append error {r.status_code}: {r.text}")
+        return r.json() or {}
 
     # ---- File Upload API (single part, <= 20MB) ----
 
@@ -364,7 +384,15 @@ class Pipeline:
 
         chunk = 60
         for i in range(0, len(blocks), chunk):
-            self.notion.append_children(self.page_id, blocks[i:i + chunk], after_block_id=after_id)
+            resp = self.notion.append_children(self.page_id, blocks[i:i + chunk], after_block_id=after_id)
+
+            # Update after_id so the next chunk is inserted directly after the chunk we just inserted.
+            results = (resp or {}).get("results", []) or []
+            if results:
+                first_new_id = results[0].get("id")
+                if first_new_id:
+                    after_id = first_new_id
+
             time.sleep(0.1)
 
         self.mark(fp, path.name)
@@ -577,6 +605,27 @@ class NotesMenuApp(rumps.App):
                 status_cb=self.status_cb
             )
             handler = FolderHandler(pipeline, watch, self.status_cb)
+
+            # ✅ Batch existing files on startup (before/after watcher start)
+            try:
+                pending = list_pending_images(watch)
+                if pending:
+                    self.status_cb(f"Batch processing {len(pending)} file(s)…")
+                    log(f"Batch startup: {len(pending)} file(s)")
+
+                    for p in pending:
+                        try:
+                            pipeline.process(p)
+                            p.replace(handler.proc / p.name)
+                        except Exception as e:
+                            self.status_cb(f"Error: {e}")
+                            log(f"ERROR batch processing {p}: {repr(e)}")
+                            try:
+                                p.replace(handler.fail / p.name)
+                            except Exception:
+                                pass
+            except Exception as e:
+                log(f"Batch startup failed (ignored): {repr(e)}")
 
             self.observer = Observer()
             self.observer.schedule(handler, str(watch), recursive=False)
