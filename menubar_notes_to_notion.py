@@ -445,8 +445,12 @@ class FolderHandler(FileSystemEventHandler):
 
 class NotesMenuApp(rumps.App):
     def __init__(self):
-        super().__init__(APP_NAME, quit_button=None)
-        self.title = "📷📝"
+        super().__init__(
+            APP_NAME,
+            quit_button=None,
+            icon="icon.png",
+            template=False,
+        )
 
         self.status_msg = "Idle"
         self.observer: Optional[Observer] = None

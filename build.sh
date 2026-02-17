@@ -3,6 +3,10 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 
+APP_NAME="NotesToNotion"
+APP_BUNDLE="dist/${APP_NAME}.app"
+SIGN_IDENTITY="NotesToNotion Dev"
+
 # Create venv only if missing
 if [ ! -d ".venv" ]; then
   python3 -m venv .venv
@@ -12,8 +16,6 @@ source .venv/bin/activate
 
 python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
-
-# ✅ Install dev deps + run tests (build stops if tests fail)
 python -m pip install -r requirements-dev.txt
 
 echo
@@ -22,15 +24,22 @@ python -m pytest -ra
 echo "✅ Tests passed."
 echo
 
-pyinstaller --noconfirm --clean --windowed \
-  --name "NotesToNotion" \
-  --icon "assets/icon.icns" \
-  run.py
+echo "📦 Building app (spec is source of truth)..."
+# NOTE: When building from a spec, do NOT pass --windowed/--icon/--name flags here.
+pyinstaller NotesToNotion.spec --noconfirm --clean
 
-# --- SIGN APP ---
-codesign --deep --force --sign "NotesToNotion Dev" \
-  dist/NotesToNotion.app
+if [ ! -d "${APP_BUNDLE}" ]; then
+  echo "❌ Build failed: ${APP_BUNDLE} not found"
+  exit 1
+fi
 
 echo
-echo "✅ Built: dist/NotesToNotion.app"
+echo "🔏 Code signing..."
+codesign --deep --force --sign "${SIGN_IDENTITY}" "${APP_BUNDLE}"
+
+echo "🔎 Verifying signature..."
+codesign --verify --deep --strict --verbose=2 "${APP_BUNDLE}" || true
+
+echo
+echo "✅ Built: ${APP_BUNDLE}"
 echo "Drag it into /Applications (or run ./reinstall.sh)"
