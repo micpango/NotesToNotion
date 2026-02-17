@@ -7,9 +7,8 @@ import os
 import sys
 from pathlib import Path
 from datetime import datetime
-
-APP_NAME = "NotesToNotion"
-APP_VERSION = "v0.2.1"
+from app_contract import APP_NAME, APP_VERSION, NOTION_VERSION, DEFAULT_OPENAI_MODEL
+from prompt_contract import PROMPT
 
 LOG_DIR = Path.home() / "Library" / "Application Support" / "NotesToNotion"
 LOG_DIR.mkdir(parents=True, exist_ok=True)
@@ -66,7 +65,7 @@ CONFIG_PATH = CONFIG_DIR / "config.json"
 STATE_PATH = CONFIG_DIR / "processed.json"
 
 SUPPORTED_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".heic"}
-NOTION_VERSION = "2025-09-03"
+NOTION_VERSION = NOTION_VERSION
 
 def list_pending_images(watch: Path) -> List[Path]:
     """
@@ -568,7 +567,7 @@ class NotesMenuApp(rumps.App):
         cfg["WATCH_FOLDER"] = w.text.strip()
         cfg["NOTION_PAGE_URL"] = nurl.text.strip()
         cfg["NOTION_PAGE_ID"] = page_id
-        cfg.setdefault("OPENAI_MODEL", "gpt-5.2")
+        cfg.setdefault("OPENAI_MODEL", DEFAULT_OPENAI_MODEL)
         save_config(cfg)
 
         if notion_tok.text.strip():
@@ -679,6 +678,7 @@ class NotesMenuApp(rumps.App):
         model = cfg.get("OPENAI_MODEL", "gpt-5.2")
         msg = "\n".join([
             f"{APP_NAME} {APP_VERSION}",
+            f"Notion-Version: {NOTION_VERSION}",
             "",
             f"Log: {LOG_FILE}",
             f"Config: {CONFIG_PATH}",
