@@ -131,7 +131,5 @@ def build_notion_blocks(
                 "bulleted_list_item": {"rich_text": rt_text(f"❓ {q}")}
             })
 
-        # Spacer (leave for now; Polish 2 will remove this)
-        blocks.append({"object": "block", "type": "paragraph", "paragraph": {"rich_text": rt_text("")}})
 
     return blocks
