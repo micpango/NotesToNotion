@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional
 _PREFIX_RE = re.compile(r"^\s*([.\-xX\?])\s+")
 _NUM_RE = re.compile(r"^\s*(\d+)\.\s+(.*)")
 _HASH_TITLE_RE = re.compile(r"^\s*#\s*(.+)\s*$")
+_BULLET_TASK_PREFIXES = ("•", "·", "∙", "◦", "○")
 
 
 def date_mention_rich_text(dt: datetime):
@@ -35,28 +36,16 @@ def strip_known_prefix(s: str) -> str:
     return s.strip()
 
 
-def _is_hash_header_line(note_text: str) -> Optional[str]:
+def _is_hash_header_line(line: str) -> Optional[str]:
     """
-    If the note line starts a new entry (e.g. "#Ledermøte" or "# Ledermøte"),
+    If the line starts a new entry (e.g. "#Ledermøte" or "# Ledermøte"),
     return the title without '#'. Otherwise return None.
     """
-    m = _HASH_TITLE_RE.match(note_text or "")
+    m = _HASH_TITLE_RE.match(line or "")
     if not m:
         return None
     title = (m.group(1) or "").strip()
     return title or None
-
-
-def _ensure_section(sections: List[Dict[str, Any]], current: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-    """
-    Ensure we have an active section. If none exists, create default.
-    Returns active section.
-    """
-    if current is not None:
-        return current
-    current = {"title": "Handwritten notes", "topics": []}
-    sections.append(current)
-    return current
 
 
 def _get_topic_bucket(section: Dict[str, Any], topic_title: str) -> Dict[str, Any]:
@@ -79,6 +68,68 @@ def _section_has_content(section: Dict[str, Any]) -> bool:
     return False
 
 
+def _split_prefix_kind(raw_line: str) -> tuple[str, str]:
+    """
+    Returns (kind, text) where kind in:
+      - "hash" (start new section)
+      - "task_open"
+      - "task_done"
+      - "question"
+      - "note"
+    """
+    s = (raw_line or "").strip()
+    if not s:
+        return ("note", "")
+
+    # hash section marker must win, even if someone wrote "- #Ledermøte"
+    # so check after stripping known prefixes once for detection only
+    s_for_hash = strip_known_prefix(s)
+    h = _is_hash_header_line(s_for_hash)
+    if h:
+        return ("hash", h)
+
+    # detect explicit prefixes on the ORIGINAL trimmed string
+    # (we also accept variants without trailing space defensively)
+    if s.startswith(". "):
+        return ("task_open", s[2:].strip())
+    if s.startswith("."):
+        return ("task_open", s[1:].strip())
+
+    if s.lower().startswith("x "):
+        return ("task_done", s[2:].strip())
+    if s.lower().startswith("x"):
+        return ("task_done", s[1:].strip())
+
+    if s.startswith("? "):
+        q = s[2:].strip()
+        # if question accidentally includes numbering, strip it
+        m = _NUM_RE.match(q)
+        if m:
+            q = (m.group(2) or "").strip()
+        return ("question", q)
+
+    if s.startswith("?"):
+        q = s[1:].strip()
+        m = _NUM_RE.match(q)
+        if m:
+            q = (m.group(2) or "").strip()
+        return ("question", q)
+
+    if s.startswith("- "):
+        return ("note", s[2:].strip())
+    if s.startswith("-"):
+        return ("note", s[1:].strip())
+
+    # Handwritten "dot" often becomes a bullet character in transcription.
+    # In your notation, dot-at-start means task.
+    if s and s[0] in _BULLET_TASK_PREFIXES:
+        text = s[1:].strip()
+        return ("task_open", text)
+
+    # default note
+    return ("note", s)
+
+
 def build_notion_blocks(
     parsed: Dict[str, Any],
     filename: str,
@@ -93,11 +144,11 @@ def build_notion_blocks(
 
     topics = parsed.get("topics") or [{"title": "General", "tasks": [], "notes": [], "questions": []}]
 
-    # --- NEW: Split into multiple "entries" inside one image based on "#..." note lines.
+    # Split into multiple "entries" inside one image based on "#..." lines inside notes.
     sections: List[Dict[str, Any]] = []
     current_section: Optional[Dict[str, Any]] = None
 
-    # Buffer until first "#..." appears (so tasks/questions before first # belong to first section)
+    # Buffer until first # appears
     pending_topics: List[Dict[str, Any]] = []
 
     def _pending_bucket(topic_title: str) -> Dict[str, Any]:
@@ -114,73 +165,80 @@ def build_notion_blocks(
         section["topics"].extend(pending_topics)
         pending_topics.clear()
 
+    def _ensure_section(title: str) -> Dict[str, Any]:
+        nonlocal current_section
+        current_section = {"title": title, "topics": []}
+        sections.append(current_section)
+        return current_section
+
+    # ---- Normalize / route content
     for t in topics:
         topic_title = (t.get("title") or "General").strip() or "General"
 
-        # Tasks
+        # 1) Tasks from model (trusted bucket)
         for task in (t.get("tasks") or []):
             text = (task.get("text") or "").strip()
             if not text:
                 continue
-
             if current_section is None:
                 _pending_bucket(topic_title)["tasks"].append(task)
             else:
                 _get_topic_bucket(current_section, topic_title)["tasks"].append(task)
 
-        # Notes (may start new section)
-        for note in (t.get("notes") or []):
-            note_clean = strip_known_prefix(str(note))
-            if not note_clean:
-                continue
-
-            new_title = _is_hash_header_line(note_clean)
-            if new_title:
-                # Start new section
-                if current_section is None:
-                    current_section = {"title": new_title, "topics": []}
-                    sections.append(current_section)
-                    _flush_pending_into(current_section)
-                else:
-                    current_section = {"title": new_title, "topics": []}
-                    sections.append(current_section)
-                continue
-
-            if current_section is None:
-                _pending_bucket(topic_title)["notes"].append(note_clean)
-            else:
-                _get_topic_bucket(current_section, topic_title)["notes"].append(note_clean)
-
-        # Questions
+        # 2) Questions from model (trusted bucket)
         for q in (t.get("questions") or []):
             q_clean = strip_known_prefix(str(q))
             if not q_clean:
                 continue
-
             if current_section is None:
                 _pending_bucket(topic_title)["questions"].append(q_clean)
             else:
                 _get_topic_bucket(current_section, topic_title)["questions"].append(q_clean)
 
+        # 3) Notes may contain inline routing markers (# …) or leaked prefixes (. / ? / x / -)
+        for raw_note in (t.get("notes") or []):
+            kind, text = _split_prefix_kind(str(raw_note))
+            if kind == "hash":
+                # Start new section; flush pending into first section
+                if current_section is None:
+                    sec = _ensure_section(text)
+                    _flush_pending_into(sec)
+                else:
+                    _ensure_section(text)
+                continue
+
+            if not text:
+                continue
+
+            # choose bucket (pending or current)
+            if current_section is None:
+                bucket = _pending_bucket(topic_title)
+            else:
+                bucket = _get_topic_bucket(current_section, topic_title)
+
+            if kind == "task_open":
+                bucket["tasks"].append({"text": text, "done": False})
+            elif kind == "task_done":
+                bucket["tasks"].append({"text": text, "done": True})
+            elif kind == "question":
+                bucket["questions"].append(text)
+            else:
+                # note
+                bucket["notes"].append(text)
+
     # If we never saw a "#..." section, create default and flush pending into it
     if not sections:
-        current_section = {"title": "Handwritten notes", "topics": []}
-        sections.append(current_section)
-        _flush_pending_into(current_section)
+        sec = {"title": "Handwritten notes", "topics": []}
+        sections.append(sec)
+        _flush_pending_into(sec)
 
-    # Drop empty sections (e.g. "#Foo" then immediately "#Bar" before any content)
+    # Drop empty sections (e.g. "#Foo" then immediately "#Bar")
     sections = [s for s in sections if _section_has_content(s)]
-
-    # Drop empty sections (e.g. "#Foo" then immediately "#Bar" before any content)
-    sections = [s for s in sections if _section_has_content(s)]
-
-    # If nothing survived, fall back to one empty-ish default section
     if not sections:
         sections = [{"title": "Handwritten notes", "topics": []}]
 
-    # --- Render
+    # ---- Render
     for idx, section in enumerate(sections):
-        # H2 per section
         blocks.append({
             "object": "block",
             "type": "heading_2",
@@ -230,9 +288,9 @@ def build_notion_blocks(
                     }
                 })
 
-            # Notes
+            # Notes: numbered list if "1. ..." else bullets
             for note in (t.get("notes") or []):
-                note = strip_known_prefix(str(note))
+                note = (note or "").strip()
                 if not note:
                     continue
 
@@ -254,7 +312,7 @@ def build_notion_blocks(
 
             # Questions
             for q in (t.get("questions") or []):
-                q = strip_known_prefix(str(q))
+                q = (q or "").strip()
                 if not q:
                     continue
                 blocks.append({

@@ -101,6 +101,15 @@ def test_image_block_included_when_upload_id_present_and_no_source_paragraph():
     ]
     assert source_paras == []
 
+def test_dot_prefixed_note_is_rendered_as_todo_even_if_in_notes():
+    parsed = {"topics": [{"title": "General", "tasks": [], "notes": [". gjør noe"], "questions": []}]}
+    blocks = build_notion_blocks(parsed, "IMG.heic", None, datetime(2026, 2, 17, 12, 0))
+
+    todos = [b for b in blocks if b.get("type") == "to_do"]
+    assert len(todos) == 1
+    assert todos[0]["to_do"]["rich_text"][0]["text"]["content"] == "gjør noe"
+    assert todos[0]["to_do"]["checked"] is False
+
 
 def test_source_paragraph_included_when_no_image_upload_id():
     parsed = {"topics": [{"title": "General", "tasks": [], "notes": ["note"], "questions": []}]}

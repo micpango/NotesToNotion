@@ -18,6 +18,12 @@ Line prefixes (must be first character on the line):
 - "- " (dash + space) = note
 - "? " (question mark + space) = question
 
+Robustness / common handwriting misreads:
+- If a leading dot task (". " or a bullet like "• ") is misread as "1. ", you MUST treat it as a task, not a numbered note.
+  Put it in "tasks" with done=false, and DO NOT keep the "1." prefix in the task text.
+- If a leading question mark ("? ") is misread as a leading "2 " or "2. ", you MUST treat it as a question.
+  Put it in "questions", and DO NOT include that leading "2" or "2." in the question text.
+
 Numbered lines:
 - "1. " / "2. " / "3. " ... at the start of a line = numbered note item.
   Keep the number prefix in the text (e.g. "1. ") so it can be rendered as a numbered list.
