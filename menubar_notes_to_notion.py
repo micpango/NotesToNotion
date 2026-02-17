@@ -412,9 +412,29 @@ class NotesMenuApp(rumps.App):
         self._refresh_menu_states()
         log("Menu initialized")
 
+        try:
+            cfg = self._ensure_config()
+            if cfg:
+                # Run after menubar is up (avoid startup flakiness)
+                rumps.Timer(self._autostart_watch, 1).start()
+                log("Auto-start scheduled")
+            else:
+                log("Auto-start skipped (missing config/keys)")
+        except Exception as e:
+            log(f"Auto-start error (ignored): {repr(e)}")
+
     def status_cb(self, msg: str):
         self.status_msg = msg
         log(f"STATUS: {msg}")
+
+    def _autostart_watch(self, _):
+        # Timer callback signature includes a timer arg we don't need
+        if self.observer is not None:
+            return
+        try:
+            self.start_watching(None)
+        except Exception as e:
+            log(f"Auto-start failed: {repr(e)}")
 
     def _refresh_menu_states(self):
         running = self.observer is not None
