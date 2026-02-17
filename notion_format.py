@@ -47,13 +47,13 @@ def build_notion_blocks(
                 "file_upload": {"id": image_upload_id},
             }
         })
-
-    # NOTE: This "Source:" paragraph stays for now. (We remove it in step 2 you listed.)
-    blocks.append({
-        "object": "block",
-        "type": "paragraph",
-        "paragraph": {"rich_text": rt_text(f"Source: {filename}")}
-    })
+    else:
+        # Only include textual source reference when we could not attach the image
+        blocks.append({
+            "object": "block",
+            "type": "paragraph",
+            "paragraph": {"rich_text": rt_text(f"Source: {filename}")}
+        })
 
     blocks.append({"object": "block", "type": "divider", "divider": {}})
 
