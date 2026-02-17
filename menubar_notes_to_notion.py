@@ -35,7 +35,7 @@ import json
 import re
 import time
 import subprocess
-from typing import Optional, List, Tuple
+from typing import Optional, List
 
 import rumps
 import keyring
@@ -208,6 +208,23 @@ class NotionClient:
         results = data.get("results", [])
         return [b.get("id") for b in results if b.get("id")]
 
+    # ✅ NEW: deterministically insert after the page's first H1
+    def find_first_h1_id(self, page_id: str, page_size: int = 50) -> Optional[str]:
+        """
+        Returns the id of the first heading_1 block among the page's top-level children.
+        If not found, returns None.
+        """
+        url = f"{self.base}/blocks/{page_id}/children?page_size={page_size}"
+        r = requests.get(url, headers=self._headers_no_ct())
+        if r.status_code >= 300:
+            raise RuntimeError(f"Notion list children error {r.status_code}: {r.text}")
+        results = (r.json() or {}).get("results", [])
+
+        for b in results:
+            if b.get("type") == "heading_1":
+                return b.get("id")
+        return None
+
     def append_children(self, block_id: str, children: list, after_block_id: Optional[str] = None) -> None:
         """
         Appends children. If after_block_id is provided, inserts *after* that block.
@@ -250,7 +267,6 @@ class NotionClient:
         """
         Uploads image bytes to Notion as a File Upload and returns file_upload_id.
         """
-        # Note: file size limits depend on workspace (free bots can be 5MiB).
         fu = self.create_file_upload(filename=filename, content_type=content_type, content_length=len(data))
         file_upload_id = fu.get("id")
         if not file_upload_id:
@@ -259,7 +275,6 @@ class NotionClient:
         sent = self.send_file_upload(file_upload_id=file_upload_id, filename=filename, content_type=content_type, data=data)
         status = (sent or {}).get("status")
         if status not in (None, "uploaded"):
-            # Some responses may not include status immediately; treat non-failure as ok.
             log(f"Notion upload status: {status}")
 
         return file_upload_id
@@ -325,7 +340,7 @@ class Pipeline:
             }
         })
 
-        # ✅ Attach image (as image block) if available
+        # Attach image (as image block) if available
         if image_file_upload_id:
             blocks.append({
                 "object": "block",
@@ -359,7 +374,7 @@ class Pipeline:
                         "to_do": {"rich_text": rt_text(text), "checked": bool(task.get("done", False))}
                     })
 
-            # ✅ Fix 1: numbered notes become numbered list items
+            # Numbered notes become numbered list items
             for note in (t.get("notes") or []):
                 note = str(note).strip()
                 if not note:
@@ -405,12 +420,14 @@ class Pipeline:
         try:
             self.status_cb(f"Uploading image: {path.name}")
             log(f"Uploading image to Notion: {path}")
-            # Always upload as JPEG for compatibility + consistent size
             upload_name = f"{path.stem}.jpg"
-            image_file_upload_id = self.notion.upload_image_bytes(filename=upload_name, data=jpeg_bytes, content_type="image/jpeg")
+            image_file_upload_id = self.notion.upload_image_bytes(
+                filename=upload_name,
+                data=jpeg_bytes,
+                content_type="image/jpeg"
+            )
             log(f"Uploaded image file_upload_id: {image_file_upload_id}")
         except Exception as e:
-            # Do not fail the whole pipeline if attachment fails; still append notes.
             image_file_upload_id = None
             log(f"Image upload failed (continuing without attachment): {repr(e)}")
 
@@ -423,19 +440,21 @@ class Pipeline:
 
         blocks = self.notion_blocks(parsed, path.name, image_file_upload_id=image_file_upload_id)
 
-        # ✅ Fix 2: Insert newest right after the top/anchor block (not at bottom)
+        # ✅ NEW INSERT LOGIC: always insert right after first H1 on the page
         try:
-            child_ids = self.notion.list_children_ids(self.page_id, page_size=50)
-            after_id = child_ids[0] if child_ids else None
+            after_id = self.notion.find_first_h1_id(self.page_id)
+
+            # Fallback if for some reason no H1 exists
+            if not after_id:
+                child_ids = self.notion.list_children_ids(self.page_id, page_size=50)
+                after_id = child_ids[0] if child_ids else None
         except Exception as e:
             after_id = None
-            log(f"Could not fetch children for insert-after; fallback to append: {repr(e)}")
+            log(f"Could not resolve insert-after; fallback to append: {repr(e)}")
 
         # chunk to avoid payload limits
         chunk = 60
 
-        # Insert first chunk after anchor. Then keep inserting after the same anchor.
-        # (Notion inserts "after X" as a single operation; keeping anchor fixed preserves our chunk order near the top.)
         for i in range(0, len(blocks), chunk):
             self.notion.append_children(self.page_id, blocks[i:i + chunk], after_block_id=after_id)
             time.sleep(0.1)
