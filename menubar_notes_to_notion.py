@@ -35,7 +35,7 @@ import json
 import re
 import time
 import subprocess
-from typing import Optional, List
+from typing import Optional, List, Tuple
 
 import rumps
 import keyring
@@ -182,11 +182,18 @@ class NotionClient:
         self.token = token
         self.base = "https://api.notion.com/v1"
 
-    def _headers(self) -> dict:
+    def _headers_json(self) -> dict:
         return {
             "Authorization": f"Bearer {self.token}",
             "Notion-Version": NOTION_VERSION,
             "Content-Type": "application/json",
+        }
+
+    def _headers_no_ct(self) -> dict:
+        # For multipart/form-data requests, DO NOT set Content-Type manually.
+        return {
+            "Authorization": f"Bearer {self.token}",
+            "Notion-Version": NOTION_VERSION,
         }
 
     def list_children_ids(self, block_id: str, page_size: int = 50) -> List[str]:
@@ -194,7 +201,7 @@ class NotionClient:
         Returns child block IDs in order (top to bottom).
         """
         url = f"{self.base}/blocks/{block_id}/children?page_size={page_size}"
-        r = requests.get(url, headers=self._headers())
+        r = requests.get(url, headers=self._headers_no_ct())
         if r.status_code >= 300:
             raise RuntimeError(f"Notion list children error {r.status_code}: {r.text}")
         data = r.json()
@@ -210,9 +217,52 @@ class NotionClient:
         if after_block_id:
             payload["after"] = after_block_id
 
-        r = requests.patch(url, headers=self._headers(), data=json.dumps(payload))
+        r = requests.patch(url, headers=self._headers_json(), data=json.dumps(payload))
         if r.status_code >= 300:
-            raise RuntimeError(f"Notion error {r.status_code}: {r.text}")
+            raise RuntimeError(f"Notion append error {r.status_code}: {r.text}")
+
+    # ---- File Upload API (single part, <= 20MB) ----
+
+    def create_file_upload(self, filename: str, content_type: str, content_length: int) -> dict:
+        url = f"{self.base}/file_uploads"
+        payload = {
+            "mode": "single_part",
+            "filename": filename,
+            "content_type": content_type,
+            "content_length": int(content_length),
+        }
+        r = requests.post(url, headers=self._headers_json(), data=json.dumps(payload))
+        if r.status_code >= 300:
+            raise RuntimeError(f"Notion create file upload error {r.status_code}: {r.text}")
+        return r.json()
+
+    def send_file_upload(self, file_upload_id: str, filename: str, content_type: str, data: bytes) -> dict:
+        url = f"{self.base}/file_uploads/{file_upload_id}/send"
+        files = {
+            "file": (filename, data, content_type),
+        }
+        r = requests.post(url, headers=self._headers_no_ct(), files=files)
+        if r.status_code >= 300:
+            raise RuntimeError(f"Notion send file upload error {r.status_code}: {r.text}")
+        return r.json()
+
+    def upload_image_bytes(self, filename: str, data: bytes, content_type: str = "image/jpeg") -> str:
+        """
+        Uploads image bytes to Notion as a File Upload and returns file_upload_id.
+        """
+        # Note: file size limits depend on workspace (free bots can be 5MiB).
+        fu = self.create_file_upload(filename=filename, content_type=content_type, content_length=len(data))
+        file_upload_id = fu.get("id")
+        if not file_upload_id:
+            raise RuntimeError("Notion file upload did not return an id.")
+
+        sent = self.send_file_upload(file_upload_id=file_upload_id, filename=filename, content_type=content_type, data=data)
+        status = (sent or {}).get("status")
+        if status not in (None, "uploaded"):
+            # Some responses may not include status immediately; treat non-failure as ok.
+            log(f"Notion upload status: {status}")
+
+        return file_upload_id
 
 
 class Pipeline:
@@ -235,12 +285,11 @@ class Pipeline:
         self.state.setdefault("processed", {})[fp] = {"name": name, "ts": time.time()}
         state_save(self.state)
 
-    def transcribe(self, path: Path) -> dict:
-        jpeg = image_to_jpeg_bytes(path)
-        data_url = jpeg_to_data_url(jpeg)
+    def transcribe_from_jpeg(self, jpeg_bytes: bytes, filename: str) -> dict:
+        data_url = jpeg_to_data_url(jpeg_bytes)
 
-        self.status_cb(f"Transcribing: {path.name}")
-        log(f"Transcribing: {path}")
+        self.status_cb(f"Transcribing: {filename}")
+        log(f"Transcribing: {filename}")
 
         resp = self.client.responses.create(
             model=self.model,
@@ -256,13 +305,14 @@ class Pipeline:
         ot = getattr(resp, "output_text", "")
         out = ot() if callable(ot) else ot
         out = (out or "").strip()
+
         start = out.find("{")
         end = out.rfind("}")
         if start == -1 or end == -1 or end <= start:
             raise RuntimeError("Model did not return valid JSON.")
         return json.loads(out[start:end + 1])
 
-    def notion_blocks(self, parsed: dict, filename: str) -> list:
+    def notion_blocks(self, parsed: dict, filename: str, image_file_upload_id: Optional[str]) -> list:
         blocks = []
         dt = datetime.now()
 
@@ -274,6 +324,18 @@ class Pipeline:
                 "rich_text": date_mention_rich_text(dt) + rt_text(" — Handwritten notes")
             }
         })
+
+        # ✅ Attach image (as image block) if available
+        if image_file_upload_id:
+            blocks.append({
+                "object": "block",
+                "type": "image",
+                "image": {
+                    "caption": rt_text(f"Source image: {filename}"),
+                    "type": "file_upload",
+                    "file_upload": {"id": image_file_upload_id}
+                }
+            })
 
         blocks.append({
             "object": "block",
@@ -335,13 +397,33 @@ class Pipeline:
             log(f"Already processed: {path}")
             return
 
-        parsed = self.transcribe(path)
+        # Convert once, reuse for both OpenAI + Notion image attach
+        jpeg_bytes = image_to_jpeg_bytes(path)
+
+        # 1) Upload image to Notion (so we can attach it)
+        image_file_upload_id = None
+        try:
+            self.status_cb(f"Uploading image: {path.name}")
+            log(f"Uploading image to Notion: {path}")
+            # Always upload as JPEG for compatibility + consistent size
+            upload_name = f"{path.stem}.jpg"
+            image_file_upload_id = self.notion.upload_image_bytes(filename=upload_name, data=jpeg_bytes, content_type="image/jpeg")
+            log(f"Uploaded image file_upload_id: {image_file_upload_id}")
+        except Exception as e:
+            # Do not fail the whole pipeline if attachment fails; still append notes.
+            image_file_upload_id = None
+            log(f"Image upload failed (continuing without attachment): {repr(e)}")
+
+        # 2) Transcribe
+        parsed = self.transcribe_from_jpeg(jpeg_bytes, path.name)
+
+        # 3) Build blocks (including image if upload succeeded)
         self.status_cb(f"Appending: {path.name}")
         log(f"Appending: {path}")
 
-        blocks = self.notion_blocks(parsed, path.name)
+        blocks = self.notion_blocks(parsed, path.name, image_file_upload_id=image_file_upload_id)
 
-        # ✅ Fix 2: Insert newest right after the page title/top block (not at bottom)
+        # ✅ Fix 2: Insert newest right after the top/anchor block (not at bottom)
         try:
             child_ids = self.notion.list_children_ids(self.page_id, page_size=50)
             after_id = child_ids[0] if child_ids else None
@@ -352,8 +434,8 @@ class Pipeline:
         # chunk to avoid payload limits
         chunk = 60
 
-        # Insert first chunk after top block (page title area),
-        # then insert subsequent chunks after the same anchor to keep our chunk order.
+        # Insert first chunk after anchor. Then keep inserting after the same anchor.
+        # (Notion inserts "after X" as a single operation; keeping anchor fixed preserves our chunk order near the top.)
         for i in range(0, len(blocks), chunk):
             self.notion.append_children(self.page_id, blocks[i:i + chunk], after_block_id=after_id)
             time.sleep(0.1)
