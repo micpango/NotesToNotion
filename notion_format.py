@@ -5,6 +5,12 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 
+# Prefixes we may get back from the model even though the content is already categorized.
+# We strip these defensively in the formatter so output is clean/deterministic.
+_PREFIX_RE = re.compile(r"^\s*([.\-xX\?])\s+")
+_NUM_RE = re.compile(r"^\s*(\d+)\.\s+(.*)")
+
+
 def date_mention_rich_text(dt: datetime):
     iso = dt.astimezone().isoformat(timespec="minutes")
     return [{
@@ -15,6 +21,17 @@ def date_mention_rich_text(dt: datetime):
 
 def rt_text(s: str):
     return [{"type": "text", "text": {"content": s}}]
+
+
+def strip_known_prefix(s: str) -> str:
+    """
+    Defensive cleanup: remove known handwritten-annotation prefixes if they leak into
+    parsed note/question strings.
+    Example: "- foo" -> "foo", "? bar" -> "bar"
+    """
+    s = (s or "").strip()
+    s = _PREFIX_RE.sub("", s)
+    return s.strip()
 
 
 def build_notion_blocks(
@@ -83,13 +100,13 @@ def build_notion_blocks(
 
         # Notes -> numbered list if "1. ..." else bullets
         for note in (t.get("notes") or []):
-            note = str(note).strip()
+            note = strip_known_prefix(str(note))
             if not note:
                 continue
 
-            m = re.match(r"^(\d+)\.\s+(.*)", note)
+            m = _NUM_RE.match(note)
             if m:
-                text = m.group(2).strip()
+                text = (m.group(2) or "").strip()
                 if text:
                     blocks.append({
                         "object": "block",
@@ -103,8 +120,9 @@ def build_notion_blocks(
                     "bulleted_list_item": {"rich_text": rt_text(note)}
                 })
 
+        # Questions -> bullet with emoji, but strip leaked prefixes first
         for q in (t.get("questions") or []):
-            q = str(q).strip()
+            q = strip_known_prefix(str(q))
             if not q:
                 continue
             blocks.append({
@@ -113,7 +131,7 @@ def build_notion_blocks(
                 "bulleted_list_item": {"rich_text": rt_text(f"❓ {q}")}
             })
 
-        # Spacer
+        # Spacer (leave for now; Polish 2 will remove this)
         blocks.append({"object": "block", "type": "paragraph", "paragraph": {"rich_text": rt_text("")}})
 
     return blocks
