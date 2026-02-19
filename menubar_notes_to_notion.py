@@ -147,10 +147,18 @@ def image_to_jpeg_bytes(path: Path) -> bytes:
     else:
         img = Image.open(path)
 
+    w, h = img.size
+    longest = max(w, h)
+    if longest > 1800:
+        scale = 1800 / float(longest)
+        nw = max(1, int(round(w * scale)))
+        nh = max(1, int(round(h * scale)))
+        img = img.resize((nw, nh), Image.Resampling.LANCZOS)
+
     if img.mode in ("RGBA", "P"):
         img = img.convert("RGB")
     buf = io.BytesIO()
-    img.save(buf, format="JPEG", quality=92)
+    img.save(buf, format="JPEG", quality=75)
     return buf.getvalue()
 
 
