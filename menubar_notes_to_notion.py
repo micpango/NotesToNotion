@@ -602,7 +602,7 @@ class NotesMenuApp(rumps.App):
         try:
             pipeline = Pipeline(
                 openai_key=openai_key,
-                model=cfg.get("OPENAI_MODEL", "gpt-5.2"),
+                model=cfg.get("OPENAI_MODEL", "gpt-5-mini"),
                 notion_token=notion_token,
                 page_id=cfg["NOTION_PAGE_ID"],
                 status_cb=self.status_cb
@@ -679,7 +679,7 @@ class NotesMenuApp(rumps.App):
 
     def about(self, _):
         cfg = load_config()
-        model = cfg.get("OPENAI_MODEL", "gpt-5.2")
+        model = cfg.get("OPENAI_MODEL", "gpt-5-mini")
         msg = "\n".join([
             f"{APP_NAME} {APP_VERSION}",
             f"Notion-Version: {NOTION_VERSION}",
