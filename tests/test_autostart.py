@@ -171,3 +171,47 @@ def test_menu_no_longer_contains_open_failed(monkeypatch):
     app = appmod.NotesMenuApp()
     titles = [item.title for item in getattr(app._menu, "items", []) if hasattr(item, "title")]
     assert "Open _failed" not in titles
+
+
+def test_start_watching_uses_default_openai_model(monkeypatch, tmp_path):
+    _patch_rumps_headless(monkeypatch)
+
+    watch = tmp_path / "watch"
+    cfg = {
+        "WATCH_FOLDER": str(watch),
+        "NOTION_PAGE_ID": "PAGEID",
+        "OPENAI_MODEL": "gpt-5.2",
+    }
+
+    monkeypatch.setattr(appmod, "load_config", lambda: cfg)
+    monkeypatch.setattr(appmod.NotesMenuApp, "_ensure_config", lambda self: cfg)
+    monkeypatch.setattr(appmod, "keychain_get", lambda name: "token")
+    monkeypatch.setattr(appmod, "log", lambda msg: None)
+    monkeypatch.setattr(appmod.rumps, "alert", lambda *args: None)
+    monkeypatch.setattr(appmod, "list_pending_images", lambda watch_path: [])
+
+    used = {"model": None}
+
+    class DummyPipeline:
+        def __init__(self, openai_key, model, notion_token, page_id, status_cb):
+            used["model"] = model
+
+    class DummyFolderHandler:
+        def __init__(self, pipeline, watch, status_cb, refresh_menu_cb=None):
+            pass
+
+    class DummyObserver:
+        def schedule(self, handler, path, recursive=False):
+            return None
+
+        def start(self):
+            return None
+
+    monkeypatch.setattr(appmod, "Pipeline", DummyPipeline)
+    monkeypatch.setattr(appmod, "FolderHandler", DummyFolderHandler)
+    monkeypatch.setattr(appmod, "Observer", lambda: DummyObserver())
+
+    app = appmod.NotesMenuApp()
+    app.start_watching(None)
+
+    assert used["model"] == appmod.DEFAULT_OPENAI_MODEL

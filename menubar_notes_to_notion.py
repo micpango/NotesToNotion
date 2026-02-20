@@ -33,6 +33,7 @@ def log_debug(msg: str) -> None:
 log("=== App starting ===")
 log(f"Python: {sys.version}")
 log(f"Executable: {sys.executable}")
+log(f"Model: {DEFAULT_OPENAI_MODEL}")
 
 # ------------------------------
 # Normal imports (may crash in bundles; logging above helps)
@@ -808,7 +809,6 @@ class NotesMenuApp(rumps.App):
         cfg["WATCH_FOLDER"] = w.text.strip()
         cfg["NOTION_PAGE_URL"] = nurl.text.strip()
         cfg["NOTION_PAGE_ID"] = page_id
-        cfg.setdefault("OPENAI_MODEL", DEFAULT_OPENAI_MODEL)
         save_config(cfg)
 
         if notion_tok.text.strip():
@@ -839,7 +839,7 @@ class NotesMenuApp(rumps.App):
         try:
             pipeline = Pipeline(
                 openai_key=openai_key,
-                model=cfg.get("OPENAI_MODEL", "gpt-5-mini"),
+                model=DEFAULT_OPENAI_MODEL,
                 notion_token=notion_token,
                 page_id=cfg["NOTION_PAGE_ID"],
                 status_cb=self.status_cb
@@ -919,15 +919,13 @@ class NotesMenuApp(rumps.App):
         subprocess.run(["open", str(LOG_FILE)])
 
     def about(self, _):
-        cfg = load_config()
-        model = cfg.get("OPENAI_MODEL", "gpt-5-mini")
         msg = "\n".join([
             f"{APP_NAME} {APP_VERSION}",
             f"Notion-Version: {NOTION_VERSION}",
             "",
             f"Log: {LOG_FILE}",
             f"Config: {CONFIG_PATH}",
-            f"Model: {model}",
+            f"Model: {DEFAULT_OPENAI_MODEL}",
         ])
         rumps.alert("About", msg)
 
