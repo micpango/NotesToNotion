@@ -105,6 +105,18 @@ def list_pending_images(watch: Path) -> List[Path]:
     return pending
 
 
+def get_failed_count(watch_folder: Optional[Path]) -> int:
+    if not watch_folder:
+        return 0
+    failed_dir = watch_folder / "_failed"
+    if not failed_dir.exists() or not failed_dir.is_dir():
+        return 0
+    try:
+        return sum(1 for p in failed_dir.iterdir() if p.is_file())
+    except Exception:
+        return 0
+
+
 def load_config() -> dict:
     if not CONFIG_PATH.exists():
         return {}
@@ -614,10 +626,11 @@ class Pipeline:
 
 
 class FolderHandler(FileSystemEventHandler):
-    def __init__(self, pipeline: Pipeline, watch: Path, status_cb):
+    def __init__(self, pipeline: Pipeline, watch: Path, status_cb, refresh_menu_cb=None):
         self.pipeline = pipeline
         self.watch = watch
         self.status_cb = status_cb
+        self.refresh_menu_cb = refresh_menu_cb
         self.proc = watch / "_processed"
         self.fail = watch / "_failed"
         self.proc.mkdir(exist_ok=True)
@@ -655,6 +668,9 @@ class FolderHandler(FileSystemEventHandler):
                 path.replace(self.fail / path.name)
             except Exception:
                 pass
+        finally:
+            if self.refresh_menu_cb:
+                self.refresh_menu_cb()
 
 
 class NotesMenuApp(rumps.App):
@@ -675,7 +691,6 @@ class NotesMenuApp(rumps.App):
         self.mi_status = rumps.MenuItem("Status…", callback=self.show_status)
         self.mi_open_last_note = rumps.MenuItem("Open last note", callback=self.open_last_note)
         self.mi_open_watch = rumps.MenuItem("Open Watch Folder", callback=self.open_watch_folder)
-        self.mi_open_failed = rumps.MenuItem("Open _failed", callback=self.open_failed)
         self.mi_open_log = rumps.MenuItem("Open Log", callback=self.open_log)
         self.mi_about = rumps.MenuItem(f"About ({APP_VERSION})", callback=self.about)
         self.mi_quit = rumps.MenuItem("Quit", callback=self.quit_app)
@@ -688,7 +703,6 @@ class NotesMenuApp(rumps.App):
             self.mi_status,
             self.mi_open_last_note,
             self.mi_open_watch,
-            self.mi_open_failed,
             self.mi_open_log,
             None,
             self.mi_about,
@@ -725,6 +739,13 @@ class NotesMenuApp(rumps.App):
     def _refresh_menu_states(self):
         running = self.observer is not None
         self.mi_start.state = 1 if running else 0
+        cfg = load_config()
+        watch_folder = cfg.get("WATCH_FOLDER")
+        failed_count = get_failed_count(Path(watch_folder).expanduser() if watch_folder else None)
+        if failed_count > 0:
+            self.mi_open_watch.title = f"Open Watch Folder — {failed_count} failed"
+        else:
+            self.mi_open_watch.title = "Open Watch Folder"
 
     def _ensure_config(self) -> Optional[dict]:
         cfg = load_config()
@@ -823,7 +844,7 @@ class NotesMenuApp(rumps.App):
                 page_id=cfg["NOTION_PAGE_ID"],
                 status_cb=self.status_cb
             )
-            handler = FolderHandler(pipeline, watch, self.status_cb)
+            handler = FolderHandler(pipeline, watch, self.status_cb, refresh_menu_cb=self._refresh_menu_states)
 
             # ✅ Batch existing files on startup (before/after watcher start)
             try:
@@ -843,6 +864,8 @@ class NotesMenuApp(rumps.App):
                                 p.replace(handler.fail / p.name)
                             except Exception:
                                 pass
+                        finally:
+                            self._refresh_menu_states()
             except Exception as e:
                 log(f"Batch startup failed (ignored): {repr(e)}")
 
@@ -890,12 +913,6 @@ class NotesMenuApp(rumps.App):
         p = cfg.get("WATCH_FOLDER")
         if p:
             subprocess.run(["open", p])
-
-    def open_failed(self, _):
-        cfg = load_config()
-        p = cfg.get("WATCH_FOLDER")
-        if p:
-            subprocess.run(["open", str(Path(p) / "_failed")])
 
     def open_log(self, _):
         subprocess.run(["open", str(LOG_FILE)])

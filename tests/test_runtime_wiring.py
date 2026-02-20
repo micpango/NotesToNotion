@@ -161,3 +161,29 @@ def test_folder_on_created_triggers_notify_on_success(monkeypatch, tmp_path: Pat
     assert notified["n"] == 1
     assert notified["title"] != ""
     assert notified["body"] != ""
+
+
+def test_folder_on_created_calls_refresh_menu_cb(monkeypatch, tmp_path: Path):
+    img = tmp_path / "IMG_REFRESH.HEIC"
+    img.write_bytes(b"fake")
+    monkeypatch.setattr(appmod.time, "sleep", lambda _n: None)
+
+    refreshed = {"n": 0}
+
+    class DummyPipeline:
+        def process(self, path):
+            return None
+
+    handler = appmod.FolderHandler(
+        DummyPipeline(),
+        tmp_path,
+        lambda msg: None,
+        refresh_menu_cb=lambda: refreshed.__setitem__("n", refreshed["n"] + 1),
+    )
+
+    class Event:
+        is_directory = False
+        src_path = str(img)
+
+    handler.on_created(Event())
+    assert refreshed["n"] == 1
