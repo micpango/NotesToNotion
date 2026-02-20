@@ -193,6 +193,10 @@ def build_notion_block_url(block_id: str) -> str:
     return f"https://www.notion.so/{notion_id_without_dashes(block_id)}"
 
 
+def build_notion_page_anchor_url(page_id: str, block_id: str) -> str:
+    return f"https://www.notion.so/{notion_id_without_dashes(page_id)}#{notion_id_without_dashes(block_id)}"
+
+
 def first_h2_section_title(blocks: list) -> Optional[str]:
     for block in (blocks or []):
         if block.get("type") != "heading_2":
@@ -405,6 +409,27 @@ class NotionClient:
             raise RuntimeError(f"Notion append error {r.status_code}: {r.text}")
         return r.json()
 
+    def get_block(self, block_id: str) -> dict:
+        url = f"{self.base}/blocks/{block_id}"
+        r = requests.get(url, headers=self._headers_no_ct())
+        if r.status_code >= 300:
+            raise RuntimeError(f"Notion get block error {r.status_code}: {r.text}")
+        return r.json() or {}
+
+    def resolve_parent_page_id(self, block_id: str) -> Optional[str]:
+        current_block_id = block_id
+        for _ in range(10):
+            block = self.get_block(current_block_id) or {}
+            parent = block.get("parent") or {}
+            parent_type = parent.get("type")
+            if parent_type == "page_id":
+                return parent.get("page_id")
+            if parent_type == "block_id" and parent.get("block_id"):
+                current_block_id = parent.get("block_id")
+                continue
+            return None
+        return None
+
     # ---- File Upload API (single part, <= 20MB) ----
 
     def create_file_upload(self, filename: str, content_type: str, content_length: int) -> dict:
@@ -559,11 +584,27 @@ class Pipeline:
 
         log_debug("before notify")
         section_title = first_h2_section_title(blocks)
+        # "Last note" points to the first H2 block created for this image.
+        note_url = None
+        if first_h2_block_id:
+            parent_page_id = None
+            try:
+                parent_page_id = self.notion.resolve_parent_page_id(first_h2_block_id)
+            except Exception as e:
+                log(f"Could not resolve parent page id: {repr(e)}")
+            if parent_page_id:
+                note_url = build_notion_page_anchor_url(parent_page_id, first_h2_block_id)
+            else:
+                note_url = build_notion_block_url(first_h2_block_id)
+        if note_url:
+            self.state["last_note_url"] = note_url
+            self.state["last_note_ts"] = time.time()
+            self.state["last_note_title"] = section_title or path.name
         try:
             notify_processed_image(
                 section_title,
                 path.name,
-                build_notion_block_url(first_h2_block_id) if first_h2_block_id else None,
+                note_url,
             )
         except Exception as e:
             log(f"Notification error: {repr(e)}")
@@ -634,6 +675,7 @@ class NotesMenuApp(rumps.App):
         self.mi_stop = rumps.MenuItem("Stop Watching", callback=self.stop_watching)
         self.mi_setup = rumps.MenuItem("Setup…", callback=self.setup)
         self.mi_status = rumps.MenuItem("Status…", callback=self.show_status)
+        self.mi_open_last_note = rumps.MenuItem("Open last note", callback=self.open_last_note)
         self.mi_open_watch = rumps.MenuItem("Open Watch Folder", callback=self.open_watch_folder)
         self.mi_open_failed = rumps.MenuItem("Open _failed", callback=self.open_failed)
         self.mi_open_log = rumps.MenuItem("Open Log", callback=self.open_log)
@@ -646,6 +688,7 @@ class NotesMenuApp(rumps.App):
             None,
             self.mi_setup,
             self.mi_status,
+            self.mi_open_last_note,
             self.mi_open_watch,
             self.mi_open_failed,
             self.mi_open_log,
@@ -836,6 +879,14 @@ class NotesMenuApp(rumps.App):
 
     def show_status(self, _):
         rumps.alert("Status", self.status_msg or "—")
+
+    def open_last_note(self, _):
+        st = state_load()
+        url = st.get("last_note_url")
+        if not url:
+            rumps.alert("No note yet", "No processed note in this session")
+            return
+        subprocess.run(["open", url])
 
     def open_watch_folder(self, _):
         cfg = load_config()

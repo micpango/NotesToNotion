@@ -73,3 +73,18 @@ def test_append_children_returns_json(monkeypatch):
 
     out = notion.append_children("PAGE", [{"object": "block"}], after_block_id=None)
     assert out == payload
+
+
+def test_resolve_parent_page_id_walks_block_chain(monkeypatch):
+    notion = appmod.NotionClient(token="x")
+
+    def fake_get(url, headers):
+        if url.endswith("/blocks/child-block"):
+            return DummyResp(200, {"parent": {"type": "block_id", "block_id": "parent-block"}})
+        if url.endswith("/blocks/parent-block"):
+            return DummyResp(200, {"parent": {"type": "page_id", "page_id": "page-1234"}})
+        return DummyResp(404, {"error": "not found"})
+
+    monkeypatch.setattr(appmod.requests, "get", fake_get)
+
+    assert notion.resolve_parent_page_id("child-block") == "page-1234"

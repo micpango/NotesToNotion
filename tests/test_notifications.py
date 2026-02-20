@@ -7,6 +7,13 @@ def test_build_notion_block_url_strips_dashes():
     assert url == "https://www.notion.so/abcdefabcdefabcdefabcdefabcdef12"
 
 
+def test_build_notion_page_anchor_url_strips_dashes():
+    page_id = "11111111-2222-3333-4444-555555555555"
+    block_id = "abcdefab-cdef-abcd-efab-cdefabcdef12"
+    url = appmod.build_notion_page_anchor_url(page_id, block_id)
+    assert url == "https://www.notion.so/11111111222233334444555555555555#abcdefabcdefabcdefabcdefabcdef12"
+
+
 def test_extract_first_h2_block_id_from_append_response_prefers_h2_id():
     resp = {
         "results": [
