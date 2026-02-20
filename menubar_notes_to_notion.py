@@ -22,6 +22,14 @@ def log(msg: str):
     except Exception:
         pass
 
+DEBUG_LOGGING = os.getenv("NOTES_TO_NOTION_DEBUG", "").strip() == "1"
+
+
+def log_debug(msg: str) -> None:
+    if DEBUG_LOGGING:
+        log(msg)
+
+
 log("=== App starting ===")
 log(f"Python: {sys.version}")
 log(f"Executable: {sys.executable}")
@@ -232,7 +240,7 @@ def notify_processed_image(section_title: Optional[str], filename: str, url: Opt
     title = (section_title or "").strip()
     detail = title if title and title != "Handwritten notes" else (filename or "").strip() or "Notat"
     identifier = _success_notification_identifier(filename)
-    log(f"DEBUG: notify identifier = {identifier}")
+    log_debug(f"notify identifier = {identifier}")
     notify("Notat lagt til", detail, url, identifier=identifier)
 
 
@@ -284,16 +292,16 @@ def notify(title: str, body: str, url: Optional[str], identifier: Optional[str] 
             note.setIdentifier_(note_identifier)
         if url:
             note.setUserInfo_({"url": url})
-        log(f"DEBUG: notify: start (title={title_text}, url={url})")
+        log_debug(f"notify: start (title={title_text}, url={url})")
         center.deliverNotification_(note)
-        log("DEBUG: notify: delivered")
+        log_debug("notify: delivered")
     except Exception as e:
-        log(f"DEBUG: notify: error {repr(e)}")
+        log(f"Notification error: {repr(e)}")
 
 
 def dispatch_processed_image_notification(section_title: Optional[str], filename: str, url: Optional[str]) -> None:
     current_name = threading.current_thread().name
-    print(f"notification thread: {current_name}")
+    log_debug(f"notification thread: {current_name}")
     if current_name == "MainThread":
         notify_processed_image(section_title, filename, url)
         return
@@ -534,9 +542,9 @@ class Pipeline:
         chunk = 60
         for i in range(0, len(blocks), chunk):
             chunk_blocks = blocks[i:i + chunk]
-            log("DEBUG: before append")
+            log_debug("before append")
             resp = self.notion.append_children(self.page_id, chunk_blocks, after_block_id=after_id)
-            log("DEBUG: after append")
+            log_debug("after append")
             if first_h2_block_id is None:
                 first_h2_block_id = extract_first_h2_block_id_from_append_response(resp, chunk_blocks)
 
@@ -549,7 +557,7 @@ class Pipeline:
 
             time.sleep(0.1)
 
-        log("DEBUG: before notify")
+        log_debug("before notify")
         section_title = first_h2_section_title(blocks)
         try:
             notify_processed_image(
@@ -558,7 +566,7 @@ class Pipeline:
                 build_notion_block_url(first_h2_block_id) if first_h2_block_id else None,
             )
         except Exception as e:
-            log(f"DEBUG: notify: error {repr(e)}")
+            log(f"Notification error: {repr(e)}")
         self.mark(fp, path.name)
         self.status_cb(f"Done: {path.name}")
         log(f"Done: {path}")
@@ -616,7 +624,7 @@ class NotesMenuApp(rumps.App):
             icon="icon.png",
             template=False,
         )
-        log("DEBUG: startup notify called")
+        log_debug("startup notify called")
         notify("NotesToNotion", "Startup notification test", None)
 
         self.status_msg = "Idle"
