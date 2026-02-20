@@ -112,7 +112,7 @@ def get_failed_count(watch_folder: Optional[Path]) -> int:
     if not failed_dir.exists() or not failed_dir.is_dir():
         return 0
     try:
-        return sum(1 for p in failed_dir.iterdir() if p.is_file())
+        return sum(1 for p in failed_dir.iterdir() if p.is_file() and not p.name.startswith("."))
     except Exception:
         return 0
 
@@ -909,6 +909,7 @@ class NotesMenuApp(rumps.App):
         subprocess.run(["open", url])
 
     def open_watch_folder(self, _):
+        self._refresh_menu_states()
         cfg = load_config()
         p = cfg.get("WATCH_FOLDER")
         if p:

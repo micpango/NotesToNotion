@@ -120,6 +120,47 @@ def test_open_watch_folder_label_hides_failed_when_zero(monkeypatch, tmp_path):
     assert app.mi_open_watch.title == "Open Watch Folder"
 
 
+def test_open_watch_folder_label_ignores_hidden_files(monkeypatch, tmp_path):
+    _patch_rumps_headless(monkeypatch)
+
+    watch = tmp_path / "watch"
+    failed = watch / "_failed"
+    failed.mkdir(parents=True)
+    (failed / ".DS_Store").write_bytes(b"x")
+
+    monkeypatch.setattr(appmod, "load_config", lambda: {"WATCH_FOLDER": str(watch)})
+    monkeypatch.setattr(appmod.NotesMenuApp, "_ensure_config", lambda self: None)
+    monkeypatch.setattr(appmod, "log", lambda msg: None)
+
+    app = appmod.NotesMenuApp()
+
+    assert app.mi_open_watch.title == "Open Watch Folder"
+
+
+def test_open_watch_folder_refreshes_label_before_open(monkeypatch, tmp_path):
+    _patch_rumps_headless(monkeypatch)
+
+    watch = tmp_path / "watch"
+    failed = watch / "_failed"
+    failed.mkdir(parents=True)
+
+    monkeypatch.setattr(appmod, "load_config", lambda: {"WATCH_FOLDER": str(watch)})
+    monkeypatch.setattr(appmod.NotesMenuApp, "_ensure_config", lambda self: None)
+    monkeypatch.setattr(appmod, "log", lambda msg: None)
+
+    opened = {"cmd": None}
+    monkeypatch.setattr(appmod.subprocess, "run", lambda cmd: opened.__setitem__("cmd", cmd))
+
+    app = appmod.NotesMenuApp()
+    assert app.mi_open_watch.title == "Open Watch Folder"
+
+    (failed / "a.jpg").write_bytes(b"x")
+    app.open_watch_folder(None)
+
+    assert opened["cmd"] == ["open", str(watch)]
+    assert "1 failed" in app.mi_open_watch.title
+
+
 def test_menu_no_longer_contains_open_failed(monkeypatch):
     _patch_rumps_headless(monkeypatch)
 
