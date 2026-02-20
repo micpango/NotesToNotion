@@ -6,6 +6,7 @@ def _patch_rumps_headless(monkeypatch):
 
     # Fake base init
     monkeypatch.setattr(appmod.rumps.App, "__init__", lambda self, *a, **k: None)
+    monkeypatch.setattr(appmod, "notify", lambda *a, **k: None)
 
     # Minimal MenuItem
     class DummyMenuItem:

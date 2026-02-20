@@ -59,3 +59,17 @@ def test_list_children_ids_paginates(monkeypatch):
 
     assert notion.list_children_ids("PAGE", page_size=2) == ["a", "b", "c"]
     assert calls["n"] == 2
+
+
+def test_append_children_returns_json(monkeypatch):
+    notion = appmod.NotionClient(token="x")
+
+    payload = {"results": [{"id": "abc", "type": "heading_2"}]}
+
+    def fake_patch(url, headers, data):
+        return DummyResp(200, payload)
+
+    monkeypatch.setattr(appmod.requests, "patch", fake_patch)
+
+    out = notion.append_children("PAGE", [{"object": "block"}], after_block_id=None)
+    assert out == payload

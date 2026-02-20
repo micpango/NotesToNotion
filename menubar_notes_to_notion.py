@@ -34,6 +34,8 @@ import json
 import re
 import time
 import subprocess
+import threading
+import uuid
 from typing import Optional, List
 
 import rumps
@@ -47,6 +49,14 @@ from PIL import Image
 
 from prompt_contract import PROMPT
 from notion_format import build_notion_blocks
+
+try:
+    from Foundation import NSObject
+    from AppKit import NSUserNotification, NSUserNotificationCenter
+except Exception:
+    NSObject = object
+    NSUserNotification = None
+    NSUserNotificationCenter = None
 
 # HEIC support is best-effort; do not crash app if pillow_heif fails in bundle.
 try:
@@ -167,6 +177,137 @@ def jpeg_to_data_url(b: bytes) -> str:
     return "data:image/jpeg;base64," + base64.b64encode(b).decode("utf-8")
 
 
+def notion_id_without_dashes(raw_id: str) -> str:
+    return (raw_id or "").replace("-", "")
+
+
+def build_notion_block_url(block_id: str) -> str:
+    return f"https://www.notion.so/{notion_id_without_dashes(block_id)}"
+
+
+def first_h2_section_title(blocks: list) -> Optional[str]:
+    for block in (blocks or []):
+        if block.get("type") != "heading_2":
+            continue
+        rt = ((block.get("heading_2") or {}).get("rich_text") or [])
+        text = "".join(
+            ((p.get("text") or {}).get("content") or "")
+            for p in rt
+            if p.get("type") == "text"
+        ).strip()
+        if text.startswith("—"):
+            text = text[1:].strip()
+        elif text.startswith("-"):
+            text = text[1:].strip()
+        return text or None
+    return None
+
+
+def extract_first_h2_block_id_from_append_response(resp: dict, chunk_blocks: Optional[list] = None) -> Optional[str]:
+    results = (resp or {}).get("results", []) or []
+    for b in results:
+        if b.get("type") == "heading_2" and b.get("id"):
+            return b.get("id")
+
+    # Fallback mapping by position when Notion response omits block type.
+    if chunk_blocks and results:
+        for idx, src in enumerate(chunk_blocks):
+            if src.get("type") == "heading_2" and idx < len(results):
+                mapped = (results[idx] or {}).get("id")
+                if mapped:
+                    return mapped
+
+    # Last-resort fallback: first created block id.
+    if results and results[0].get("id"):
+        return results[0].get("id")
+    return None
+
+
+def _success_notification_identifier(filename: str) -> str:
+    name = (filename or "").strip() or "image"
+    return f"success-{name}-{uuid.uuid4().hex[:12]}"
+
+
+def notify_processed_image(section_title: Optional[str], filename: str, url: Optional[str]) -> None:
+    title = (section_title or "").strip()
+    detail = title if title and title != "Handwritten notes" else (filename or "").strip() or "Notat"
+    identifier = _success_notification_identifier(filename)
+    log(f"DEBUG: notify identifier = {identifier}")
+    notify("Notat lagt til", detail, url, identifier=identifier)
+
+
+class NotificationCenterDelegate(NSObject):
+    def userNotificationCenter_didActivateNotification_(self, center, notification):
+        try:
+            info = notification.userInfo() if hasattr(notification, "userInfo") else None
+            url = info.get("url") if isinstance(info, dict) else None
+            if url:
+                subprocess.run(["open", url])
+        except Exception as e:
+            log(f"Could not open notification url: {repr(e)}")
+
+
+_notification_delegate = None
+_pending_notify_timers = []
+
+
+def ensure_notification_center_delegate() -> None:
+    global _notification_delegate
+    if NSUserNotificationCenter is None or _notification_delegate is not None:
+        return
+    try:
+        center = NSUserNotificationCenter.defaultUserNotificationCenter()
+        _notification_delegate = NotificationCenterDelegate.alloc().init()
+        center.setDelegate_(_notification_delegate)
+    except Exception as e:
+        log(f"Could not set notification center delegate: {repr(e)}")
+
+
+def notify(title: str, body: str, url: Optional[str], identifier: Optional[str] = None) -> None:
+    if NSUserNotificationCenter is None or NSUserNotification is None:
+        log("NSUserNotificationCenter unavailable; skipping notification")
+        return
+
+    title_text = (title or "").strip() or "Notat lagt til"
+    body_text = (body or "").strip() or "Notat"
+    note_identifier = (identifier or "").strip() or f"note-{uuid.uuid4().hex[:12]}"
+
+    try:
+        ensure_notification_center_delegate()
+        center = NSUserNotificationCenter.defaultUserNotificationCenter()
+        note = NSUserNotification.alloc().init()
+        note.setTitle_(title_text)
+        note.setInformativeText_(body_text)
+        if hasattr(note, "setSoundName_"):
+            note.setSoundName_(None)
+        if hasattr(note, "setIdentifier_"):
+            note.setIdentifier_(note_identifier)
+        if url:
+            note.setUserInfo_({"url": url})
+        log(f"DEBUG: notify: start (title={title_text}, url={url})")
+        center.deliverNotification_(note)
+        log("DEBUG: notify: delivered")
+    except Exception as e:
+        log(f"DEBUG: notify: error {repr(e)}")
+
+
+def dispatch_processed_image_notification(section_title: Optional[str], filename: str, url: Optional[str]) -> None:
+    current_name = threading.current_thread().name
+    print(f"notification thread: {current_name}")
+    if current_name == "MainThread":
+        notify_processed_image(section_title, filename, url)
+        return
+
+    def _one_shot(timer):
+        try:
+            timer.stop()
+        except Exception:
+            pass
+        notify_processed_image(section_title, filename, url)
+
+    rumps.Timer(_one_shot, 0).start()
+
+
 class NotionClient:
     def __init__(self, token: str):
         self.token = token
@@ -254,7 +395,7 @@ class NotionClient:
         r = requests.patch(url, headers=self._headers_json(), data=json.dumps(payload))
         if r.status_code >= 300:
             raise RuntimeError(f"Notion append error {r.status_code}: {r.text}")
-        return r.json() or {}
+        return r.json()
 
     # ---- File Upload API (single part, <= 20MB) ----
 
@@ -389,9 +530,15 @@ class Pipeline:
             after_id = None
             log(f"Could not resolve insert-after; fallback to append: {repr(e)}")
 
+        first_h2_block_id = None
         chunk = 60
         for i in range(0, len(blocks), chunk):
-            resp = self.notion.append_children(self.page_id, blocks[i:i + chunk], after_block_id=after_id)
+            chunk_blocks = blocks[i:i + chunk]
+            log("DEBUG: before append")
+            resp = self.notion.append_children(self.page_id, chunk_blocks, after_block_id=after_id)
+            log("DEBUG: after append")
+            if first_h2_block_id is None:
+                first_h2_block_id = extract_first_h2_block_id_from_append_response(resp, chunk_blocks)
 
             # Update after_id so the next chunk is inserted directly after the chunk we just inserted.
             results = (resp or {}).get("results", []) or []
@@ -402,6 +549,16 @@ class Pipeline:
 
             time.sleep(0.1)
 
+        log("DEBUG: before notify")
+        section_title = first_h2_section_title(blocks)
+        try:
+            notify_processed_image(
+                section_title,
+                path.name,
+                build_notion_block_url(first_h2_block_id) if first_h2_block_id else None,
+            )
+        except Exception as e:
+            log(f"DEBUG: notify: error {repr(e)}")
         self.mark(fp, path.name)
         self.status_cb(f"Done: {path.name}")
         log(f"Done: {path}")
@@ -459,6 +616,8 @@ class NotesMenuApp(rumps.App):
             icon="icon.png",
             template=False,
         )
+        log("DEBUG: startup notify called")
+        notify("NotesToNotion", "Startup notification test", None)
 
         self.status_msg = "Idle"
         self.observer: Optional[Observer] = None
