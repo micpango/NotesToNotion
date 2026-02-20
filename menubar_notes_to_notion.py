@@ -665,8 +665,6 @@ class NotesMenuApp(rumps.App):
             icon="icon.png",
             template=False,
         )
-        log_debug("startup notify called")
-        notify("NotesToNotion", "Startup notification test", None)
 
         self.status_msg = "Idle"
         self.observer: Optional[Observer] = None
@@ -854,7 +852,6 @@ class NotesMenuApp(rumps.App):
 
             self.status_msg = f"Watching: {watch}"
             log(f"Watching: {watch}")
-            rumps.notification(APP_NAME, "Started", str(watch))
         except Exception as e:
             self.observer = None
             log(f"Could not start watcher: {repr(e)}")
