@@ -228,6 +228,16 @@ def test_about_includes_version_model_and_usage(monkeypatch):
         "state_load",
         lambda: {"processed": {"a": {"name": "a.jpg"}, "b": {"name": "b.jpg"}}},
     )
+    monkeypatch.setattr(
+        appmod,
+        "usage_load",
+        lambda path: {"events": [{"ts": 1700000000.0, "input_tokens": 1000, "output_tokens": 500}]},
+    )
+    monkeypatch.setattr(
+        appmod,
+        "usage_aggregates",
+        lambda events, now_ts=None: {"count": 1, "total_cost": 0.12, "avg_cost": 0.12, "last7_cost": 0.12},
+    )
     monkeypatch.setattr(appmod.NotesMenuApp, "_ensure_config", lambda self: None)
     monkeypatch.setattr(appmod, "log", lambda msg: None)
 
@@ -245,6 +255,7 @@ def test_about_includes_version_model_and_usage(monkeypatch):
     assert appmod.APP_VERSION in captured["msg"]
     assert appmod.DEFAULT_OPENAI_MODEL in captured["msg"]
     assert "Usage" in captured["msg"]
-    m = re.search(r"Total images processed:\s*(\d+)", captured["msg"])
+    m = re.search(r"Images processed:\s*(\d+)", captured["msg"])
     assert m is not None
     assert int(m.group(1)) >= 0
+    assert "Estimated cost (lifetime): $0.12" in captured["msg"]

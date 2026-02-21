@@ -8,6 +8,7 @@ def test_pipeline_process_uses_build_notion_blocks(monkeypatch, tmp_path: Path):
     # Arrange: make a fake image file (content doesn't matter because we monkeypatch conversion)
     img = tmp_path / "IMG_TEST.HEIC"
     img.write_bytes(b"fake")
+    monkeypatch.setattr(appmod, "USAGE_PATH", tmp_path / "usage.json")
 
     # Force "not seen" behavior and avoid writing state to user home
     monkeypatch.setattr(appmod.Pipeline, "seen", lambda self, fp: False)
@@ -95,6 +96,7 @@ def test_pipeline_process_uses_build_notion_blocks(monkeypatch, tmp_path: Path):
 def test_folder_on_created_triggers_notify_on_success(monkeypatch, tmp_path: Path):
     img = tmp_path / "IMG_WATCH.HEIC"
     img.write_bytes(b"fake")
+    monkeypatch.setattr(appmod, "USAGE_PATH", tmp_path / "usage.json")
 
     monkeypatch.setattr(appmod.Pipeline, "seen", lambda self, fp: False)
     monkeypatch.setattr(appmod.Pipeline, "mark", lambda self, fp, name: None)
@@ -187,3 +189,104 @@ def test_folder_on_created_calls_refresh_menu_cb(monkeypatch, tmp_path: Path):
 
     handler.on_created(Event())
     assert refreshed["n"] == 1
+
+
+def test_pipeline_process_records_usage_event(monkeypatch, tmp_path: Path):
+    img = tmp_path / "IMG_USAGE.HEIC"
+    img.write_bytes(b"fake")
+    usage_path = tmp_path / "usage.json"
+    monkeypatch.setattr(appmod, "USAGE_PATH", usage_path)
+    monkeypatch.setattr(appmod.Pipeline, "seen", lambda self, fp: False)
+    monkeypatch.setattr(appmod.Pipeline, "mark", lambda self, fp, name: None)
+    monkeypatch.setattr(appmod, "image_to_jpeg_bytes", lambda p: b"jpegbytes")
+    monkeypatch.setattr(appmod.time, "sleep", lambda _n: None)
+    monkeypatch.setattr(
+        appmod,
+        "build_notion_blocks",
+        lambda parsed, filename, image_upload_id, now: [
+            {
+                "object": "block",
+                "type": "heading_2",
+                "heading_2": {"rich_text": [{"type": "text", "text": {"content": "General"}}]},
+            }
+        ],
+    )
+    monkeypatch.setattr(appmod, "notify", lambda *args, **kwargs: None)
+
+    def fake_transcribe(self, jpeg, fname):
+        self._last_usage = {
+            "model": self.model,
+            "input_tokens": 1234,
+            "output_tokens": 234,
+        }
+        return {
+            "topics": [{"title": "General", "tasks": [], "notes": [], "questions": []}]
+        }
+
+    monkeypatch.setattr(appmod.Pipeline, "transcribe_from_jpeg", fake_transcribe)
+
+    class FakeNotion:
+        def upload_image_bytes(self, filename, data, content_type="image/jpeg"):
+            return "UPLOAD123"
+
+        def find_first_h1_id(self, page_id, page_size=50):
+            return "H1BLOCK"
+
+        def list_children_ids(self, block_id, page_size=50):
+            return ["FIRSTCHILD"]
+
+        def append_children(self, block_id, children, after_block_id=None):
+            return {
+                "results": [{"id": "abcdefab-cdef-abcd-efab-cdefabcdef12", "type": "heading_2"}]
+            }
+
+        def resolve_parent_page_id(self, block_id):
+            return None
+
+    p = appmod.Pipeline(
+        openai_key="x",
+        model="gpt-5-mini",
+        notion_token="y",
+        page_id="PAGEID",
+        status_cb=lambda msg: None,
+    )
+    p.notion = FakeNotion()
+
+    p.process(img)
+
+    usage = appmod.usage_load(usage_path)
+    assert len(usage["events"]) == 1
+    assert usage["events"][0]["input_tokens"] == 1234
+    assert usage["events"][0]["output_tokens"] == 234
+
+
+def test_transcribe_extracts_usage_tokens_from_response():
+    class FakeUsage:
+        input_tokens = 321
+        output_tokens = 123
+
+    class FakeResp:
+        model = "gpt-5-mini"
+        usage = FakeUsage()
+        output_text = '{"topics": []}'
+
+    class FakeResponses:
+        def create(self, **kwargs):
+            return FakeResp()
+
+    class FakeClient:
+        responses = FakeResponses()
+
+    p = appmod.Pipeline(
+        openai_key="x",
+        model="gpt-5-mini",
+        notion_token="y",
+        page_id="PAGEID",
+        status_cb=lambda msg: None,
+    )
+    p.client = FakeClient()
+
+    parsed = p.transcribe_from_jpeg(b"jpeg", "IMG_1234.HEIC")
+    assert parsed == {"topics": []}
+    assert p._last_usage["input_tokens"] == 321
+    assert p._last_usage["output_tokens"] == 123

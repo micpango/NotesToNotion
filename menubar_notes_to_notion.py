@@ -9,6 +9,11 @@ from pathlib import Path
 from datetime import datetime
 from app_contract import APP_NAME, APP_VERSION, NOTION_VERSION, DEFAULT_OPENAI_MODEL
 from prompt_contract import PROMPT
+from usage_tracker import (
+    append_event as usage_append_event,
+    aggregates as usage_aggregates,
+    load_usage as usage_load,
+)
 
 LOG_DIR = Path.home() / "Library" / "Application Support" / "NotesToNotion"
 LOG_DIR.mkdir(parents=True, exist_ok=True)
@@ -82,6 +87,7 @@ SERVICE_NAME = "com.notes-to-notion"
 CONFIG_DIR = LOG_DIR
 CONFIG_PATH = CONFIG_DIR / "config.json"
 STATE_PATH = CONFIG_DIR / "processed.json"
+USAGE_PATH = CONFIG_DIR / "usage.json"
 
 SUPPORTED_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".heic"}
 NOTION_VERSION = NOTION_VERSION
@@ -141,6 +147,19 @@ def state_load() -> dict:
 def state_save(state: dict) -> None:
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     STATE_PATH.write_text(json.dumps(state, ensure_ascii=False, indent=2), "utf-8")
+
+
+def usage_int(usage: object, field: str) -> int:
+    if usage is None:
+        return 0
+    if isinstance(usage, dict):
+        val = usage.get(field)
+    else:
+        val = getattr(usage, field, None)
+    try:
+        return max(int(val), 0)
+    except Exception:
+        return 0
 
 
 def keychain_set(name: str, value: str) -> None:
@@ -489,6 +508,7 @@ class Pipeline:
         self.page_id = page_id
         self.status_cb = status_cb
         self.state = state_load()
+        self._last_usage = None
 
     def fingerprint(self, path: Path) -> str:
         import hashlib
@@ -517,6 +537,14 @@ class Pipeline:
                 ],
             }],
         )
+        usage = getattr(resp, "usage", None)
+        if usage is None:
+            log(f"OpenAI response missing usage for {filename}; defaulting token counts to 0")
+        self._last_usage = {
+            "model": getattr(resp, "model", None) or self.model,
+            "input_tokens": usage_int(usage, "input_tokens"),
+            "output_tokens": usage_int(usage, "output_tokens"),
+        }
 
         ot = getattr(resp, "output_text", "")
         out = ot() if callable(ot) else ot
@@ -527,6 +555,20 @@ class Pipeline:
         if start == -1 or end == -1 or end <= start:
             raise RuntimeError("Model did not return valid JSON.")
         return json.loads(out[start:end + 1])
+
+    def record_usage(self, filename: str) -> None:
+        usage = self._last_usage or {}
+        event = {
+            "ts": time.time(),
+            "model": usage.get("model") or self.model,
+            "input_tokens": usage.get("input_tokens", 0),
+            "output_tokens": usage.get("output_tokens", 0),
+            "filename": filename,
+        }
+        try:
+            usage_append_event(USAGE_PATH, event)
+        except Exception as e:
+            log(f"Usage tracking failed: {repr(e)}")
 
     def process(self, path: Path) -> None:
         fp = self.fingerprint(path)
@@ -554,6 +596,7 @@ class Pipeline:
             log(f"Image upload failed (continuing without attachment): {repr(e)}")
 
         parsed = self.transcribe_from_jpeg(jpeg_bytes, path.name)
+        self.record_usage(path.name)
 
         self.status_cb(f"Appending: {path.name}")
         log(f"Appending: {path}")
@@ -924,6 +967,10 @@ class NotesMenuApp(rumps.App):
         st = state_load()
         processed = st.get("processed", {})
         processed_count = len(processed) if isinstance(processed, dict) else 0
+        usage_data = usage_load(USAGE_PATH)
+        usage_events = usage_data.get("events", [])
+        agg = usage_aggregates(usage_events, now_ts=time.time())
+        images_count = max(processed_count, int(agg.get("count", 0)))
         msg = "\n".join([
             "System:",
             f"{APP_NAME} {APP_VERSION}",
@@ -932,7 +979,11 @@ class NotesMenuApp(rumps.App):
             f"Watch folder: {watch_folder}",
             "",
             "Usage:",
-            f"Total images processed: {processed_count}",
+            f"Images processed: {images_count}",
+            f"Estimated cost (lifetime): ${agg.get('total_cost', 0.0):.2f}",
+            f"Avg per image: ${agg.get('avg_cost', 0.0):.2f}",
+            f"Last 7 days: ${agg.get('last7_cost', 0.0):.2f}",
+            "Pricing basis: local estimated token price list",
         ])
         rumps.alert("About", msg)
 
