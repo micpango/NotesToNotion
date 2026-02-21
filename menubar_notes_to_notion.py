@@ -276,8 +276,40 @@ def notify_processed_image(section_title: Optional[str], filename: str, url: Opt
     title = (section_title or "").strip()
     detail = title if title and title != "Handwritten notes" else (filename or "").strip() or "Notat"
     identifier = _success_notification_identifier(filename)
-    log_debug(f"notify identifier = {identifier}")
     notify("Notat lagt til", detail, url, identifier=identifier)
+
+
+_failed_notification_paths = set()
+_failed_notification_lock = threading.Lock()
+
+
+def _failure_reason_short(exc: Optional[Exception]) -> str:
+    message = ""
+    if exc is not None:
+        message = (str(exc) or "").strip()
+    if message:
+        message = message.splitlines()[0].strip()
+    return message or "Ukjent feil"
+
+
+def notify_failed_image(path: Path, exc: Optional[Exception]) -> None:
+    try:
+        key = str(path.expanduser().resolve())
+    except Exception:
+        key = str(path)
+
+    with _failed_notification_lock:
+        if key in _failed_notification_paths:
+            return
+        _failed_notification_paths.add(key)
+
+    reason = _failure_reason_short(exc)
+    body = f"{path.name} — {reason}" if path.name else reason
+    body = body[:120]
+    try:
+        notify("Notat feilet", body, None, identifier=f"failed-{uuid.uuid4().hex[:12]}")
+    except Exception as e:
+        log(f"Failure notification error: {repr(e)}")
 
 
 class NotificationCenterDelegate(NSObject):
@@ -328,17 +360,13 @@ def notify(title: str, body: str, url: Optional[str], identifier: Optional[str] 
             note.setIdentifier_(note_identifier)
         if url:
             note.setUserInfo_({"url": url})
-        log_debug(f"notify: start (title={title_text}, url={url})")
         center.deliverNotification_(note)
-        log_debug("notify: delivered")
     except Exception as e:
         log(f"Notification error: {repr(e)}")
 
 
 def dispatch_processed_image_notification(section_title: Optional[str], filename: str, url: Optional[str]) -> None:
-    current_name = threading.current_thread().name
-    log_debug(f"notification thread: {current_name}")
-    if current_name == "MainThread":
+    if threading.current_thread().name == "MainThread":
         notify_processed_image(section_title, filename, url)
         return
 
@@ -623,9 +651,7 @@ class Pipeline:
         chunk = 60
         for i in range(0, len(blocks), chunk):
             chunk_blocks = blocks[i:i + chunk]
-            log_debug("before append")
             resp = self.notion.append_children(self.page_id, chunk_blocks, after_block_id=after_id)
-            log_debug("after append")
             if first_h2_block_id is None:
                 first_h2_block_id = extract_first_h2_block_id_from_append_response(resp, chunk_blocks)
 
@@ -638,7 +664,6 @@ class Pipeline:
 
             time.sleep(0.1)
 
-        log_debug("before notify")
         section_title = first_h2_section_title(blocks)
         # "Last note" points to the first H2 block created for this image.
         note_url = None
@@ -712,6 +737,7 @@ class FolderHandler(FileSystemEventHandler):
                 path.replace(self.fail / path.name)
             except Exception:
                 pass
+            notify_failed_image(path, e)
         finally:
             if self.refresh_menu_cb:
                 self.refresh_menu_cb()
@@ -907,6 +933,7 @@ class NotesMenuApp(rumps.App):
                                 p.replace(handler.fail / p.name)
                             except Exception:
                                 pass
+                            notify_failed_image(p, e)
                         finally:
                             self._refresh_menu_states()
             except Exception as e:

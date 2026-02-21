@@ -206,3 +206,73 @@ def test_dispatch_processed_image_notification_uses_timer_off_main_thread(monkey
     assert called["timer_started"] is True
     assert called["interval"] == 0
     assert called["notified"] == 1
+
+
+def test_failure_notification_sent_once_on_folder_exception(monkeypatch, tmp_path):
+    img = tmp_path / "IMG_FAIL.HEIC"
+    img.write_bytes(b"x")
+    monkeypatch.setattr(appmod.time, "sleep", lambda _n: None)
+
+    called = {"n": 0, "path": None, "exc": None}
+
+    def _notify_failed(path, exc):
+        called["n"] += 1
+        called["path"] = path
+        called["exc"] = exc
+
+    monkeypatch.setattr(appmod, "notify_failed_image", _notify_failed)
+
+    class FailingPipeline:
+        def process(self, path):
+            raise RuntimeError("Feilet her\nDetaljer")
+
+    handler = appmod.FolderHandler(FailingPipeline(), tmp_path, lambda _msg: None)
+
+    class Event:
+        is_directory = False
+        src_path = str(img)
+
+    handler.on_created(Event())
+
+    assert called["n"] == 1
+    assert called["path"] == img
+    assert "Feilet her" in str(called["exc"])
+
+
+def test_failure_notification_not_duplicated_for_same_file(monkeypatch, tmp_path):
+    monkeypatch.setattr(appmod, "_failed_notification_paths", set())
+    called = {"n": 0}
+    monkeypatch.setattr(
+        appmod,
+        "notify",
+        lambda title, body, url, identifier=None: called.__setitem__("n", called["n"] + 1),
+    )
+
+    path = tmp_path / "IMG_DUP.HEIC"
+    appmod.notify_failed_image(path, RuntimeError("A"))
+    appmod.notify_failed_image(path, RuntimeError("B"))
+
+    assert called["n"] == 1
+
+
+def test_failure_notification_body_trimmed_and_uses_first_line(monkeypatch, tmp_path):
+    monkeypatch.setattr(appmod, "_failed_notification_paths", set())
+    called = {"title": None, "body": None}
+
+    monkeypatch.setattr(
+        appmod,
+        "notify",
+        lambda title, body, url, identifier=None: called.update({"title": title, "body": body}),
+    )
+
+    long_first_line = "Dette er en veldig lang feilmelding " * 8
+    exc = RuntimeError(long_first_line + "\nAndre linje skal ikke med")
+    path = tmp_path / "IMG_LONG_ERROR.HEIC"
+
+    appmod.notify_failed_image(path, exc)
+
+    assert called["title"] == "Notat feilet"
+    assert called["body"].startswith("IMG_LONG_ERROR.HEIC — ")
+    assert "\n" not in called["body"]
+    assert "Andre linje" not in called["body"]
+    assert len(called["body"]) <= 120
