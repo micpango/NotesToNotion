@@ -919,13 +919,20 @@ class NotesMenuApp(rumps.App):
         subprocess.run(["open", str(LOG_FILE)])
 
     def about(self, _):
+        cfg = load_config()
+        watch_folder = cfg.get("WATCH_FOLDER") or "—"
+        st = state_load()
+        processed = st.get("processed", {})
+        processed_count = len(processed) if isinstance(processed, dict) else 0
         msg = "\n".join([
+            "System:",
             f"{APP_NAME} {APP_VERSION}",
-            f"Notion-Version: {NOTION_VERSION}",
+            f"OpenAI model: {DEFAULT_OPENAI_MODEL}",
+            f"Notion API: {NOTION_VERSION}",
+            f"Watch folder: {watch_folder}",
             "",
-            f"Log: {LOG_FILE}",
-            f"Config: {CONFIG_PATH}",
-            f"Model: {DEFAULT_OPENAI_MODEL}",
+            "Usage:",
+            f"Total images processed: {processed_count}",
         ])
         rumps.alert("About", msg)
 

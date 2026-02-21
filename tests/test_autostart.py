@@ -1,3 +1,5 @@
+import re
+
 import menubar_notes_to_notion as appmod
 
 
@@ -215,3 +217,34 @@ def test_start_watching_uses_default_openai_model(monkeypatch, tmp_path):
     app.start_watching(None)
 
     assert used["model"] == appmod.DEFAULT_OPENAI_MODEL
+
+
+def test_about_includes_version_model_and_usage(monkeypatch):
+    _patch_rumps_headless(monkeypatch)
+
+    monkeypatch.setattr(appmod, "load_config", lambda: {"WATCH_FOLDER": "/tmp/watch"})
+    monkeypatch.setattr(
+        appmod,
+        "state_load",
+        lambda: {"processed": {"a": {"name": "a.jpg"}, "b": {"name": "b.jpg"}}},
+    )
+    monkeypatch.setattr(appmod.NotesMenuApp, "_ensure_config", lambda self: None)
+    monkeypatch.setattr(appmod, "log", lambda msg: None)
+
+    captured = {"title": None, "msg": None}
+    monkeypatch.setattr(
+        appmod.rumps,
+        "alert",
+        lambda title, msg: captured.update({"title": title, "msg": msg}),
+    )
+
+    app = appmod.NotesMenuApp()
+    app.about(None)
+
+    assert captured["title"] == "About"
+    assert appmod.APP_VERSION in captured["msg"]
+    assert appmod.DEFAULT_OPENAI_MODEL in captured["msg"]
+    assert "Usage" in captured["msg"]
+    m = re.search(r"Total images processed:\s*(\d+)", captured["msg"])
+    assert m is not None
+    assert int(m.group(1)) >= 0
