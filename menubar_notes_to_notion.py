@@ -7,6 +7,7 @@ import os
 import sys
 from pathlib import Path
 from datetime import datetime
+from dataclasses import dataclass
 from app_contract import APP_NAME, APP_VERSION, NOTION_VERSION, DEFAULT_OPENAI_MODEL
 from prompt_contract import PROMPT
 from usage_tracker import (
@@ -91,6 +92,17 @@ USAGE_PATH = CONFIG_DIR / "usage.json"
 
 SUPPORTED_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".heic"}
 NOTION_VERSION = NOTION_VERSION
+SESSION_TOPIC_TTL_SECONDS = 300
+_HASH_TOPIC_RE = re.compile(r"^\s*#\s*(.+)\s*$")
+_HASH_DELIMITER_RE = re.compile(r"^\s*#\s+(.+)\s*$")
+
+
+@dataclass
+class BatchContext:
+    active_entry_title: Optional[str] = None
+    active_entry_block_id: Optional[str] = None
+    active_entry_url: Optional[str] = None
+    active_after_block_id: Optional[str] = None
 
 def list_pending_images(watch: Path) -> List[Path]:
     """
@@ -537,6 +549,15 @@ class Pipeline:
         self.status_cb = status_cb
         self.state = state_load()
         self._last_usage = None
+        self.active_topic: Optional[str] = None
+        self.active_until: float = 0.0
+        self.batch_ctx: Optional[BatchContext] = None
+
+    def start_batch(self) -> None:
+        self.batch_ctx = BatchContext()
+
+    def end_batch(self) -> None:
+        self.batch_ctx = None
 
     def fingerprint(self, path: Path) -> str:
         import hashlib
@@ -598,6 +619,52 @@ class Pipeline:
         except Exception as e:
             log(f"Usage tracking failed: {repr(e)}")
 
+    def _extract_first_hash_topic(self, parsed: dict) -> Optional[str]:
+        for t in (parsed.get("topics") or []):
+            for note in (t.get("notes") or []):
+                m = _HASH_TOPIC_RE.match(str(note or ""))
+                if not m:
+                    continue
+                title = (m.group(1) or "").strip()
+                if title:
+                    return title
+        return None
+
+    def _extract_first_hash_delimiter_title(self, parsed: dict) -> Optional[str]:
+        for t in (parsed.get("topics") or []):
+            for note in (t.get("notes") or []):
+                m = _HASH_DELIMITER_RE.match(str(note or ""))
+                if not m:
+                    continue
+                title = (m.group(1) or "").strip()
+                if title:
+                    return title
+        return None
+
+    def _first_topic_bucket(self, parsed: dict) -> dict:
+        topics = parsed.get("topics")
+        if not topics:
+            parsed["topics"] = [{"title": "General", "tasks": [], "notes": [], "questions": []}]
+            topics = parsed["topics"]
+        first = topics[0]
+        notes = first.get("notes")
+        if not isinstance(notes, list):
+            first["notes"] = []
+        return first
+
+    def apply_sticky_session_topic(self, parsed: dict, now_ts: Optional[float] = None) -> dict:
+        now = float(time.time() if now_ts is None else now_ts)
+        topic = self._extract_first_hash_topic(parsed)
+        if topic:
+            self.active_topic = topic
+            self.active_until = now + SESSION_TOPIC_TTL_SECONDS
+            return parsed
+
+        if self.active_topic and now < self.active_until:
+            first = self._first_topic_bucket(parsed)
+            first["notes"].insert(0, f"# {self.active_topic}")
+        return parsed
+
     def process(self, path: Path) -> None:
         fp = self.fingerprint(path)
         if self.seen(fp):
@@ -624,6 +691,19 @@ class Pipeline:
             log(f"Image upload failed (continuing without attachment): {repr(e)}")
 
         parsed = self.transcribe_from_jpeg(jpeg_bytes, path.name)
+        hash_title = self._extract_first_hash_delimiter_title(parsed)
+        ctx = self.batch_ctx
+        start_new_entry = False
+        continue_active_entry = False
+        if ctx is not None:
+            if hash_title:
+                start_new_entry = True
+            elif ctx.active_after_block_id:
+                continue_active_entry = True
+            else:
+                start_new_entry = True
+        else:
+            parsed = self.apply_sticky_session_topic(parsed)
         self.record_usage(path.name)
 
         self.status_cb(f"Appending: {path.name}")
@@ -636,18 +716,24 @@ class Pipeline:
             image_upload_id=image_file_upload_id,
             now=datetime.now(),
         )
+        if continue_active_entry:
+            blocks = [b for b in blocks if b.get("type") != "heading_2"]
 
         # Insert after first H1
-        try:
-            after_id = self.notion.find_first_h1_id(self.page_id)
-            if not after_id:
-                child_ids = self.notion.list_children_ids(self.page_id, page_size=50)
-                after_id = child_ids[0] if child_ids else None
-        except Exception as e:
-            after_id = None
-            log(f"Could not resolve insert-after; fallback to append: {repr(e)}")
+        if ctx is not None and ctx.active_after_block_id:
+            after_id = ctx.active_after_block_id
+        else:
+            try:
+                after_id = self.notion.find_first_h1_id(self.page_id)
+                if not after_id:
+                    child_ids = self.notion.list_children_ids(self.page_id, page_size=50)
+                    after_id = child_ids[0] if child_ids else None
+            except Exception as e:
+                after_id = None
+                log(f"Could not resolve insert-after; fallback to append: {repr(e)}")
 
         first_h2_block_id = None
+        entry_tail_block_id = None
         chunk = 60
         for i in range(0, len(blocks), chunk):
             chunk_blocks = blocks[i:i + chunk]
@@ -661,6 +747,9 @@ class Pipeline:
                 first_new_id = results[0].get("id")
                 if first_new_id:
                     after_id = first_new_id
+                last_new_id = results[-1].get("id")
+                if last_new_id:
+                    entry_tail_block_id = last_new_id
 
             time.sleep(0.1)
 
@@ -681,6 +770,15 @@ class Pipeline:
             self.state["last_note_url"] = note_url
             self.state["last_note_ts"] = time.time()
             self.state["last_note_title"] = section_title or path.name
+        if ctx is not None:
+            if entry_tail_block_id:
+                ctx.active_after_block_id = entry_tail_block_id
+            if start_new_entry:
+                ctx.active_entry_title = hash_title or section_title or "Handwritten notes"
+                if first_h2_block_id:
+                    ctx.active_entry_block_id = first_h2_block_id
+                if note_url:
+                    ctx.active_entry_url = note_url
         try:
             notify_processed_image(
                 section_title,
@@ -704,6 +802,20 @@ class FolderHandler(FileSystemEventHandler):
         self.fail = watch / "_failed"
         self.proc.mkdir(exist_ok=True)
         self.fail.mkdir(exist_ok=True)
+        self._batch_lock = threading.Lock()
+
+    def _wait_until_stable(self, path: Path) -> bool:
+        last = -1
+        for _ in range(60):
+            try:
+                sz = path.stat().st_size
+            except FileNotFoundError:
+                return False
+            if sz > 0 and sz == last:
+                return True
+            last = sz
+            time.sleep(0.25)
+        return False
 
     def on_created(self, event):
         if event.is_directory:
@@ -715,32 +827,33 @@ class FolderHandler(FileSystemEventHandler):
         if path.suffix.lower() not in SUPPORTED_EXTS:
             return
 
-        # wait for file to finish writing
-        last = -1
-        for _ in range(60):
-            try:
-                sz = path.stat().st_size
-            except FileNotFoundError:
+        with self._batch_lock:
+            pending = list_pending_images(self.watch)
+            if not pending:
                 return
-            if sz > 0 and sz == last:
-                break
-            last = sz
-            time.sleep(0.25)
-
-        try:
-            self.pipeline.process(path)
-            path.replace(self.proc / path.name)
-        except Exception as e:
-            self.status_cb(f"Error: {e}")
-            log(f"ERROR processing {path}: {repr(e)}")
+            if hasattr(self.pipeline, "start_batch"):
+                self.pipeline.start_batch()
             try:
-                path.replace(self.fail / path.name)
-            except Exception:
-                pass
-            notify_failed_image(path, e)
-        finally:
-            if self.refresh_menu_cb:
-                self.refresh_menu_cb()
+                for p in pending:
+                    if not self._wait_until_stable(p):
+                        continue
+                    try:
+                        self.pipeline.process(p)
+                        p.replace(self.proc / p.name)
+                    except Exception as e:
+                        self.status_cb(f"Error: {e}")
+                        log(f"ERROR processing {p}: {repr(e)}")
+                        try:
+                            p.replace(self.fail / p.name)
+                        except Exception:
+                            pass
+                        notify_failed_image(p, e)
+                    finally:
+                        if self.refresh_menu_cb:
+                            self.refresh_menu_cb()
+            finally:
+                if hasattr(self.pipeline, "end_batch"):
+                    self.pipeline.end_batch()
 
 
 class NotesMenuApp(rumps.App):
@@ -921,21 +1034,24 @@ class NotesMenuApp(rumps.App):
                 if pending:
                     self.status_cb(f"Batch processing {len(pending)} file(s)…")
                     log(f"Batch startup: {len(pending)} file(s)")
-
-                    for p in pending:
-                        try:
-                            pipeline.process(p)
-                            p.replace(handler.proc / p.name)
-                        except Exception as e:
-                            self.status_cb(f"Error: {e}")
-                            log(f"ERROR batch processing {p}: {repr(e)}")
+                    pipeline.start_batch()
+                    try:
+                        for p in pending:
                             try:
-                                p.replace(handler.fail / p.name)
-                            except Exception:
-                                pass
-                            notify_failed_image(p, e)
-                        finally:
-                            self._refresh_menu_states()
+                                pipeline.process(p)
+                                p.replace(handler.proc / p.name)
+                            except Exception as e:
+                                self.status_cb(f"Error: {e}")
+                                log(f"ERROR batch processing {p}: {repr(e)}")
+                                try:
+                                    p.replace(handler.fail / p.name)
+                                except Exception:
+                                    pass
+                                notify_failed_image(p, e)
+                            finally:
+                                self._refresh_menu_states()
+                    finally:
+                        pipeline.end_batch()
             except Exception as e:
                 log(f"Batch startup failed (ignored): {repr(e)}")
 
