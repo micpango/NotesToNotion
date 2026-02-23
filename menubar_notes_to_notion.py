@@ -95,6 +95,7 @@ NOTION_VERSION = NOTION_VERSION
 SESSION_TOPIC_TTL_SECONDS = 300
 _HASH_TOPIC_RE = re.compile(r"^\s*#\s*(.+)\s*$")
 _HASH_DELIMITER_RE = re.compile(r"^\s*#\s+(.+)\s*$")
+BATCH_WINDOW_SECS = 120
 
 
 @dataclass
@@ -102,7 +103,8 @@ class BatchContext:
     active_entry_title: Optional[str] = None
     active_entry_block_id: Optional[str] = None
     active_entry_url: Optional[str] = None
-    active_after_block_id: Optional[str] = None
+    last_file_mtime: Optional[float] = None
+    ignore_window: bool = False
 
 def list_pending_images(watch: Path) -> List[Path]:
     """
@@ -553,8 +555,8 @@ class Pipeline:
         self.active_until: float = 0.0
         self.batch_ctx: Optional[BatchContext] = None
 
-    def start_batch(self) -> None:
-        self.batch_ctx = BatchContext()
+    def start_batch(self, ignore_window: bool = False) -> None:
+        self.batch_ctx = BatchContext(ignore_window=ignore_window)
 
     def end_batch(self) -> None:
         self.batch_ctx = None
@@ -652,6 +654,34 @@ class Pipeline:
             first["notes"] = []
         return first
 
+    def _effective_entry_for_file(self, parsed: dict, file_mtime: float) -> tuple[bool, bool, str]:
+        """
+        Returns:
+        - start_new_entry
+        - inherit_active_entry
+        - effective_entry_title
+        """
+        hash_title = self._extract_first_hash_delimiter_title(parsed)
+        ctx = self.batch_ctx
+        default_title = "Handwritten notes"
+
+        if ctx is None:
+            if hash_title:
+                return True, False, hash_title
+            return True, False, default_title
+
+        within_window = False
+        if ctx.last_file_mtime is not None:
+            within_window = abs(file_mtime - ctx.last_file_mtime) <= BATCH_WINDOW_SECS
+        if ctx.ignore_window:
+            within_window = True
+
+        if hash_title:
+            return True, False, hash_title
+        if ctx.active_entry_title and within_window:
+            return False, True, ctx.active_entry_title
+        return True, False, default_title
+
     def apply_sticky_session_topic(self, parsed: dict, now_ts: Optional[float] = None) -> dict:
         now = float(time.time() if now_ts is None else now_ts)
         topic = self._extract_first_hash_topic(parsed)
@@ -691,18 +721,13 @@ class Pipeline:
             log(f"Image upload failed (continuing without attachment): {repr(e)}")
 
         parsed = self.transcribe_from_jpeg(jpeg_bytes, path.name)
-        hash_title = self._extract_first_hash_delimiter_title(parsed)
+        file_mtime = path.stat().st_mtime if path.exists() else time.time()
+        start_new_entry, continue_active_entry, effective_entry_title = self._effective_entry_for_file(
+            parsed,
+            file_mtime,
+        )
         ctx = self.batch_ctx
-        start_new_entry = False
-        continue_active_entry = False
-        if ctx is not None:
-            if hash_title:
-                start_new_entry = True
-            elif ctx.active_after_block_id:
-                continue_active_entry = True
-            else:
-                start_new_entry = True
-        else:
+        if ctx is None:
             parsed = self.apply_sticky_session_topic(parsed)
         self.record_usage(path.name)
 
@@ -720,8 +745,10 @@ class Pipeline:
             blocks = [b for b in blocks if b.get("type") != "heading_2"]
 
         # Insert after first H1
-        if ctx is not None and ctx.active_after_block_id:
-            after_id = ctx.active_after_block_id
+        append_target_id = self.page_id
+        after_id = None
+        if continue_active_entry and ctx is not None and ctx.active_entry_block_id:
+            append_target_id = ctx.active_entry_block_id
         else:
             try:
                 after_id = self.notion.find_first_h1_id(self.page_id)
@@ -733,11 +760,10 @@ class Pipeline:
                 log(f"Could not resolve insert-after; fallback to append: {repr(e)}")
 
         first_h2_block_id = None
-        entry_tail_block_id = None
         chunk = 60
         for i in range(0, len(blocks), chunk):
             chunk_blocks = blocks[i:i + chunk]
-            resp = self.notion.append_children(self.page_id, chunk_blocks, after_block_id=after_id)
+            resp = self.notion.append_children(append_target_id, chunk_blocks, after_block_id=after_id)
             if first_h2_block_id is None:
                 first_h2_block_id = extract_first_h2_block_id_from_append_response(resp, chunk_blocks)
 
@@ -747,13 +773,13 @@ class Pipeline:
                 first_new_id = results[0].get("id")
                 if first_new_id:
                     after_id = first_new_id
-                last_new_id = results[-1].get("id")
-                if last_new_id:
-                    entry_tail_block_id = last_new_id
 
             time.sleep(0.1)
 
         section_title = first_h2_section_title(blocks)
+        effective_notify_title = section_title
+        if continue_active_entry and effective_entry_title:
+            effective_notify_title = effective_entry_title
         # "Last note" points to the first H2 block created for this image.
         note_url = None
         if first_h2_block_id:
@@ -766,22 +792,27 @@ class Pipeline:
                 note_url = build_notion_page_anchor_url(parent_page_id, first_h2_block_id)
             else:
                 note_url = build_notion_block_url(first_h2_block_id)
+        elif continue_active_entry and ctx is not None and ctx.active_entry_url:
+            note_url = ctx.active_entry_url
         if note_url:
             self.state["last_note_url"] = note_url
             self.state["last_note_ts"] = time.time()
-            self.state["last_note_title"] = section_title or path.name
+            self.state["last_note_title"] = effective_notify_title or path.name
         if ctx is not None:
-            if entry_tail_block_id:
-                ctx.active_after_block_id = entry_tail_block_id
+            ctx.last_file_mtime = file_mtime
             if start_new_entry:
-                ctx.active_entry_title = hash_title or section_title or "Handwritten notes"
+                ctx.active_entry_title = effective_entry_title or "Handwritten notes"
                 if first_h2_block_id:
                     ctx.active_entry_block_id = first_h2_block_id
+                else:
+                    ctx.active_entry_block_id = None
                 if note_url:
                     ctx.active_entry_url = note_url
+                else:
+                    ctx.active_entry_url = None
         try:
             notify_processed_image(
-                section_title,
+                effective_notify_title,
                 path.name,
                 note_url,
             )
@@ -832,7 +863,10 @@ class FolderHandler(FileSystemEventHandler):
             if not pending:
                 return
             if hasattr(self.pipeline, "start_batch"):
-                self.pipeline.start_batch()
+                try:
+                    self.pipeline.start_batch(ignore_window=False)
+                except TypeError:
+                    self.pipeline.start_batch()
             try:
                 for p in pending:
                     if not self._wait_until_stable(p):
@@ -1034,7 +1068,7 @@ class NotesMenuApp(rumps.App):
                 if pending:
                     self.status_cb(f"Batch processing {len(pending)} file(s)…")
                     log(f"Batch startup: {len(pending)} file(s)")
-                    pipeline.start_batch()
+                    pipeline.start_batch(ignore_window=True)
                     try:
                         for p in pending:
                             try:
