@@ -130,3 +130,26 @@ def test_source_paragraph_included_when_no_image_upload_id():
         and b["paragraph"]["rich_text"][0]["text"]["content"] == "Source: IMG_5.HEIC"
     ]
     assert len(source_paras) == 1
+
+
+def test_include_entry_heading_false_skips_h2_and_keeps_image_and_content():
+    parsed = {
+        "topics": [{
+            "title": "General",
+            "tasks": [],
+            "notes": ["første punkt"],
+            "questions": [],
+        }]
+    }
+
+    blocks = build_notion_blocks(
+        parsed=parsed,
+        filename="IMG_6.HEIC",
+        image_upload_id="UPLOAD123",
+        now=datetime(2026, 2, 16, 23, 19),
+        include_entry_heading=False,
+    )
+
+    assert not any(b.get("type") == "heading_2" for b in blocks)
+    assert any(b.get("type") == "image" for b in blocks)
+    assert any(b.get("type") == "bulleted_list_item" for b in blocks)

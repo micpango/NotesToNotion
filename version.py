@@ -1,2 +1,1 @@
-APP_NAME = "NotesToNotion"
-APP_VERSION = "0.3.0"
+from app_contract import APP_NAME, APP_VERSION

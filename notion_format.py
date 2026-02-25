@@ -135,6 +135,8 @@ def build_notion_blocks(
     filename: str,
     image_upload_id: Optional[str],
     now: datetime,
+    include_entry_heading: bool = True,
+    entry_title_override: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """
     Pure function: parsed transcription JSON -> Notion blocks.
@@ -239,11 +241,15 @@ def build_notion_blocks(
 
     # ---- Render
     for idx, section in enumerate(sections):
-        blocks.append({
-            "object": "block",
-            "type": "heading_2",
-            "heading_2": {"rich_text": date_mention_rich_text(now) + rt_text(f" — {section['title']}")}
-        })
+        if include_entry_heading:
+            section_title = section["title"]
+            if idx == 0 and entry_title_override:
+                section_title = entry_title_override
+            blocks.append({
+                "object": "block",
+                "type": "heading_2",
+                "heading_2": {"rich_text": date_mention_rich_text(now) + rt_text(f" — {section_title}")}
+            })
 
         # Attach image (or Source text) only once, on the first section
         if idx == 0:

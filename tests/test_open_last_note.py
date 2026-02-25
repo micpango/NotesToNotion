@@ -22,7 +22,7 @@ def test_pipeline_process_persists_last_note_url(monkeypatch, tmp_path: Path):
     monkeypatch.setattr(
         appmod,
         "build_notion_blocks",
-        lambda parsed, filename, image_upload_id, now: [
+        lambda parsed, filename, image_upload_id, now, include_entry_heading=True, entry_title_override=None: [
             {
                 "object": "block",
                 "type": "heading_2",

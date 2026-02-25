@@ -40,6 +40,9 @@ class _FakeNotion:
     def resolve_parent_page_id(self, block_id):
         return "11111111-2222-3333-4444-555555555555"
 
+    def get_block(self, block_id):
+        return {"id": block_id, "type": "heading_2"}
+
 
 def _make_pipeline(monkeypatch, tmp_path: Path, parsed_by_name: dict):
     monkeypatch.setattr(appmod, "USAGE_PATH", tmp_path / "usage.json")
@@ -92,6 +95,15 @@ def test_inherit_meeting_title_within_batch_window_when_no_hash(monkeypatch, tmp
         assert (start_new, inherit, title) == (False, True, "Ledermote")
     finally:
         p.end_batch()
+
+
+def test_extract_first_hash_title_returns_first_hash_marker():
+    parsed = {
+        "topics": [
+            {"title": "General", "tasks": [], "notes": ["note", "# Mote A", "# Mote B"], "questions": []}
+        ]
+    }
+    assert appmod.extract_first_hash_title(parsed) == "Mote A"
 
 
 def test_new_hash_starts_new_meeting_even_within_batch_window(monkeypatch, tmp_path):
@@ -158,8 +170,11 @@ def test_batch_hash_then_two_nohash_merges_under_one_entry(monkeypatch, tmp_path
     assert len(images) == 3
     assert not any(t.strip().startswith("#") for t in bullet_texts)
     assert p.notion.calls[0]["block_id"] == "PAGEID"
-    assert p.notion.calls[1]["block_id"] == "id-1"
-    assert p.notion.calls[2]["block_id"] == "id-1"
+    assert p.notion.calls[0]["children"][0]["type"] == "heading_2"
+    assert p.notion.calls[1]["block_id"] == "PAGEID"
+    assert p.notion.calls[1]["children"][0]["type"] == "paragraph"
+    assert all(c["block_id"] == "id-2" for c in p.notion.calls[2:])
+    assert all(c["block_id"] != "id-1" for c in p.notion.calls[2:])
     assert notified_titles == ["A", "A", "A"]
 
 
@@ -237,9 +252,72 @@ def test_append_plan_reuses_same_h2_block_id_for_inherited_title(monkeypatch, tm
     finally:
         p.end_batch()
 
-    assert len(p.notion.calls) >= 2
-    created_h2_id = "id-1"
-    assert p.notion.calls[1]["block_id"] == created_h2_id
+    assert len(p.notion.calls) >= 4
+    assert p.notion.calls[0]["block_id"] == "PAGEID"
+    assert p.notion.calls[0]["children"][0]["type"] == "heading_2"
+    assert p.notion.calls[1]["children"][0]["type"] == "paragraph"
+    assert p.notion.calls[3]["block_id"] == "id-2"
+    assert p.notion.calls[3]["block_id"] != "id-1"
+
+
+def test_merge_branch_builds_non_empty_blocks_and_appends(monkeypatch, tmp_path):
+    parsed = {
+        "a.png": {"topics": [{"title": "General", "tasks": [], "notes": ["# Meeting", "n1"], "questions": []}]},
+        "b.png": {"topics": [{"title": "General", "tasks": [], "notes": ["n2"], "questions": []}]},
+    }
+    p = _make_pipeline(monkeypatch, tmp_path, parsed)
+
+    calls = []
+    original_build = appmod.build_notion_blocks
+
+    def _build(parsed, filename, image_upload_id, now, include_entry_heading=True, entry_title_override=None):
+        out = original_build(
+            parsed=parsed,
+            filename=filename,
+            image_upload_id=image_upload_id,
+            now=now,
+            include_entry_heading=include_entry_heading,
+            entry_title_override=entry_title_override,
+        )
+        calls.append(
+            {
+                "filename": filename,
+                "include_entry_heading": include_entry_heading,
+                "count": len(out),
+            }
+        )
+        return out
+
+    monkeypatch.setattr(appmod, "build_notion_blocks", _build)
+
+    p.start_batch(ignore_window=False)
+    try:
+        a = tmp_path / "a.png"
+        b = tmp_path / "b.png"
+        a.write_bytes(b"x")
+        b.write_bytes(b"x")
+        _set_mtime(a, 1700000000.0)
+        _set_mtime(b, 1700000030.0)
+        p.process(a)
+        p.process(b)
+    finally:
+        p.end_batch()
+
+    assert len(calls) >= 2
+    assert calls[0]["include_entry_heading"] is True
+    assert calls[1]["include_entry_heading"] is False
+    assert calls[1]["count"] > 0
+    assert len(p.notion.calls) >= 4
+    container_id = "id-2"
+    # page 1 creates H2 + container on page
+    assert p.notion.calls[0]["block_id"] == "PAGEID"
+    assert p.notion.calls[1]["block_id"] == "PAGEID"
+    # page 2 (append-existing) must target container block, not page or H2
+    assert p.notion.calls[3]["block_id"] == container_id
+    assert p.notion.calls[3]["block_id"] != "PAGEID"
+    assert p.notion.calls[3]["block_id"] != "id-1"
+    assert len(p.notion.calls[3]["children"]) > 0
+    assert any(b.get("type") == "image" for b in p.notion.calls[3]["children"])
 
 
 def test_watcher_batch_processing_uses_deterministic_sorted_order(monkeypatch, tmp_path):
@@ -278,3 +356,110 @@ def test_watcher_batch_processing_uses_deterministic_sorted_order(monkeypatch, t
     handler.on_created(Event())
 
     assert processed == ["a.png", "b.png"]
+
+
+def test_list_pending_images_sorts_img_sequence_naturally(tmp_path):
+    p2 = tmp_path / "IMG_3211.png"
+    p1 = tmp_path / "IMG_3210.png"
+    p3 = tmp_path / "IMG_3212.png"
+    p2.write_bytes(b"x")
+    p1.write_bytes(b"x")
+    p3.write_bytes(b"x")
+
+    out = appmod.list_pending_images(tmp_path)
+    assert [p.name for p in out] == ["IMG_3210.png", "IMG_3211.png", "IMG_3212.png"]
+
+
+def test_batch_no_hash_creates_single_handwritten_entry(monkeypatch, tmp_path):
+    parsed = {
+        "a.png": {"topics": [{"title": "General", "tasks": [], "notes": ["n1"], "questions": []}]},
+        "b.png": {"topics": [{"title": "General", "tasks": [], "notes": ["n2"], "questions": []}]},
+    }
+    p = _make_pipeline(monkeypatch, tmp_path, parsed)
+
+    p.start_batch(ignore_window=False)
+    try:
+        t0 = 1700000000.0
+        for idx, name in enumerate(["a.png", "b.png"]):
+            path = tmp_path / name
+            path.write_bytes(b"x")
+            _set_mtime(path, t0 + (idx * 30))
+            p.process(path)
+    finally:
+        p.end_batch()
+
+    h2s = [b for b in _flatten_children(p.notion.calls) if b.get("type") == "heading_2"]
+    assert len(h2s) == 1
+    assert "Handwritten notes" in _h2_title(h2s[0])
+
+
+def test_separate_watcher_events_within_window_reuse_same_h2(monkeypatch, tmp_path):
+    parsed_by_name = {
+        "IMG_1000.png": {"topics": [{"title": "General", "tasks": [], "notes": ["# Meeting", "n1"], "questions": []}]},
+        "IMG_1001.png": {"topics": [{"title": "General", "tasks": [], "notes": ["n2"], "questions": []}]},
+    }
+
+    monkeypatch.setattr(appmod, "USAGE_PATH", tmp_path / "usage.json")
+    monkeypatch.setattr(appmod.Pipeline, "seen", lambda self, fp: False)
+    monkeypatch.setattr(appmod.Pipeline, "mark", lambda self, fp, name: None)
+    monkeypatch.setattr(appmod, "image_to_jpeg_bytes", lambda p: b"jpeg")
+    monkeypatch.setattr(appmod, "notify_processed_image", lambda *args, **kwargs: None)
+    monkeypatch.setattr(appmod.time, "sleep", lambda _n: None)
+
+    pipeline = appmod.Pipeline(
+        openai_key="x",
+        model="gpt-5-mini",
+        notion_token="y",
+        page_id="PAGEID",
+        status_cb=lambda _msg: None,
+    )
+    pipeline.notion = _FakeNotion()
+    monkeypatch.setattr(
+        appmod.Pipeline,
+        "transcribe_from_jpeg",
+        lambda self, jpeg, filename: parsed_by_name[filename],
+    )
+    monkeypatch.setattr(appmod.Pipeline, "record_usage", lambda self, filename: None)
+
+    handler = appmod.FolderHandler(pipeline, tmp_path, lambda _msg: None)
+
+    first = tmp_path / "IMG_1000.png"
+    first.write_bytes(b"x")
+    _set_mtime(first, 1700000000.0)
+
+    class Event1:
+        is_directory = False
+        src_path = str(first)
+
+    handler.on_created(Event1())
+
+    second = tmp_path / "IMG_1001.png"
+    second.write_bytes(b"x")
+    _set_mtime(second, 1700000030.0)
+
+    class Event2:
+        is_directory = False
+        src_path = str(second)
+
+    handler.on_created(Event2())
+
+    h2s = [b for b in _flatten_children(pipeline.notion.calls) if b.get("type") == "heading_2"]
+    assert len(h2s) == 1
+    assert all(c["block_id"] != "id-1" for c in pipeline.notion.calls[2:])
+
+
+def test_resolve_append_parent_id_prefers_page_over_non_appendable_block(monkeypatch, tmp_path):
+    p = _make_pipeline(monkeypatch, tmp_path, {})
+    p.start_batch(ignore_window=False)
+    try:
+        p.batch_ctx.active_entry_block_id = "divider-block"
+
+        class NotionWithDivider(_FakeNotion):
+            def get_block(self, block_id):
+                return {"id": block_id, "type": "divider"}
+
+        p.notion = NotionWithDivider()
+        out = p.resolve_append_parent_id(p.batch_ctx)
+        assert out == "PAGEID"
+    finally:
+        p.end_batch()

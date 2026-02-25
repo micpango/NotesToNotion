@@ -28,14 +28,6 @@ def log(msg: str):
     except Exception:
         pass
 
-DEBUG_LOGGING = os.getenv("NOTES_TO_NOTION_DEBUG", "").strip() == "1"
-
-
-def log_debug(msg: str) -> None:
-    if DEBUG_LOGGING:
-        log(msg)
-
-
 log("=== App starting ===")
 log(f"Python: {sys.version}")
 log(f"Executable: {sys.executable}")
@@ -95,16 +87,35 @@ NOTION_VERSION = NOTION_VERSION
 SESSION_TOPIC_TTL_SECONDS = 300
 _HASH_TOPIC_RE = re.compile(r"^\s*#\s*(.+)\s*$")
 _HASH_DELIMITER_RE = re.compile(r"^\s*#\s+(.+)\s*$")
+_IMG_NUM_RE = re.compile(r"(?i)^img[_-]?(\d+)$")
 BATCH_WINDOW_SECS = 120
+WATCH_BATCH_DEBOUNCE_SECS = 1.0
 
 
 @dataclass
 class BatchContext:
     active_entry_title: Optional[str] = None
     active_entry_block_id: Optional[str] = None
+    active_entry_container_block_id: Optional[str] = None
+    active_after_block_id: Optional[str] = None
     active_entry_url: Optional[str] = None
     last_file_mtime: Optional[float] = None
     ignore_window: bool = False
+
+
+_APPENDABLE_BLOCK_TYPES = {
+    "paragraph",
+    "heading_1",
+    "heading_2",
+    "heading_3",
+    "bulleted_list_item",
+    "numbered_list_item",
+    "to_do",
+    "toggle",
+    "quote",
+    "callout",
+    "synced_block",
+}
 
 def list_pending_images(watch: Path) -> List[Path]:
     """
@@ -122,7 +133,14 @@ def list_pending_images(watch: Path) -> List[Path]:
             continue
         pending.append(p)
 
-    pending.sort(key=lambda x: (x.stat().st_mtime, x.name))
+    def _sort_key(p: Path):
+        stem = p.stem or ""
+        m = _IMG_NUM_RE.match(stem)
+        if m:
+            return (0, int(m.group(1)), p.name.lower())
+        return (1, p.stat().st_mtime, p.name.lower())
+
+    pending.sort(key=_sort_key)
     return pending
 
 
@@ -261,6 +279,18 @@ def first_h2_section_title(blocks: list) -> Optional[str]:
     return None
 
 
+def extract_first_hash_title(parsed: dict) -> Optional[str]:
+    for t in (parsed.get("topics") or []):
+        for note in (t.get("notes") or []):
+            m = _HASH_DELIMITER_RE.match(str(note or ""))
+            if not m:
+                continue
+            title = (m.group(1) or "").strip()
+            if title:
+                return title
+    return None
+
+
 def extract_first_h2_block_id_from_append_response(resp: dict, chunk_blocks: Optional[list] = None) -> Optional[str]:
     results = (resp or {}).get("results", []) or []
     for b in results:
@@ -278,6 +308,28 @@ def extract_first_h2_block_id_from_append_response(resp: dict, chunk_blocks: Opt
     # Last-resort fallback: first created block id.
     if results and results[0].get("id"):
         return results[0].get("id")
+    return None
+
+
+def extract_first_block_id_by_type_from_append_response(
+    resp: dict,
+    chunk_blocks: Optional[list],
+    block_type: str,
+) -> Optional[str]:
+    results = (resp or {}).get("results", []) or []
+    if not results:
+        return None
+    if chunk_blocks:
+        for idx, src in enumerate(chunk_blocks):
+            if src.get("type") != block_type:
+                continue
+            if idx < len(results):
+                mapped = (results[idx] or {}).get("id")
+                if mapped:
+                    return mapped
+    for b in results:
+        if b.get("type") == block_type and b.get("id"):
+            return b.get("id")
     return None
 
 
@@ -556,10 +608,14 @@ class Pipeline:
         self.batch_ctx: Optional[BatchContext] = None
 
     def start_batch(self, ignore_window: bool = False) -> None:
-        self.batch_ctx = BatchContext(ignore_window=ignore_window)
+        if self.batch_ctx is None:
+            self.batch_ctx = BatchContext(ignore_window=ignore_window)
+            return
+        self.batch_ctx.ignore_window = ignore_window
 
     def end_batch(self) -> None:
-        self.batch_ctx = None
+        if self.batch_ctx is not None:
+            self.batch_ctx.ignore_window = False
 
     def fingerprint(self, path: Path) -> str:
         import hashlib
@@ -633,15 +689,7 @@ class Pipeline:
         return None
 
     def _extract_first_hash_delimiter_title(self, parsed: dict) -> Optional[str]:
-        for t in (parsed.get("topics") or []):
-            for note in (t.get("notes") or []):
-                m = _HASH_DELIMITER_RE.match(str(note or ""))
-                if not m:
-                    continue
-                title = (m.group(1) or "").strip()
-                if title:
-                    return title
-        return None
+        return extract_first_hash_title(parsed)
 
     def _first_topic_bucket(self, parsed: dict) -> dict:
         topics = parsed.get("topics")
@@ -695,6 +743,25 @@ class Pipeline:
             first["notes"].insert(0, f"# {self.active_topic}")
         return parsed
 
+    def resolve_append_parent_id(self, ctx: Optional[BatchContext]) -> str:
+        if self.page_id:
+            return self.page_id
+
+        candidate = None
+        if ctx is not None:
+            candidate = ctx.active_entry_block_id
+        if not candidate:
+            return self.page_id
+
+        try:
+            meta = self.notion.get_block(candidate) or {}
+            block_type = meta.get("type")
+            if block_type in _APPENDABLE_BLOCK_TYPES:
+                return candidate
+        except Exception:
+            pass
+        return self.page_id
+
     def process(self, path: Path) -> None:
         fp = self.fingerprint(path)
         if self.seen(fp):
@@ -740,16 +807,81 @@ class Pipeline:
             filename=path.name,
             image_upload_id=image_file_upload_id,
             now=datetime.now(),
+            include_entry_heading=not continue_active_entry,
+            entry_title_override=(effective_entry_title if start_new_entry else None),
         )
-        if continue_active_entry:
-            blocks = [b for b in blocks if b.get("type") != "heading_2"]
 
-        # Insert after first H1
-        append_target_id = self.page_id
-        after_id = None
-        if continue_active_entry and ctx is not None and ctx.active_entry_block_id:
-            append_target_id = ctx.active_entry_block_id
+        def _log_append_plan(
+            branch_name: str,
+            include_heading: bool,
+            parent_id: str,
+            block_list: list,
+        ) -> None:
+            first_block_type = block_list[0].get("type") if block_list else None
+            parent_kind = "page_id" if parent_id == self.page_id else "block_id"
+            log(
+                f"Append plan: branch={branch_name} include_entry_heading={include_heading} "
+                f"blocks={len(block_list)} first_block_type={first_block_type} "
+                f"parent_id={parent_id} parent_kind={parent_kind}"
+            )
+
+        def _append_in_chunks(
+            parent_id: str,
+            block_list: list,
+            branch_name: str,
+            include_heading: bool,
+            after_block_id: Optional[str] = None,
+            fail_on_empty: bool = False,
+        ) -> tuple[Optional[str], Optional[str], Optional[dict]]:
+            _log_append_plan(branch_name, include_heading, parent_id, block_list)
+            if not block_list:
+                log(
+                    f"ERROR: append aborted: empty blocks branch={branch_name} "
+                    f"include_entry_heading={include_heading}"
+                )
+                if fail_on_empty:
+                    raise RuntimeError("Merge branch produced empty blocks")
+                return None, None, None
+
+            chunk = 60
+            first_h2_id = None
+            last_inserted_id = None
+            last_resp = None
+            for i in range(0, len(block_list), chunk):
+                chunk_blocks = block_list[i:i + chunk]
+                resp = self.notion.append_children(parent_id, chunk_blocks, after_block_id=after_block_id)
+                last_resp = resp
+                if first_h2_id is None:
+                    first_h2_id = extract_first_h2_block_id_from_append_response(resp, chunk_blocks)
+                results = (resp or {}).get("results", []) or []
+                if results:
+                    last_new_id = results[-1].get("id")
+                    if last_new_id:
+                        last_inserted_id = last_new_id
+                        after_block_id = last_new_id
+                time.sleep(0.1)
+            return first_h2_id, last_inserted_id, last_resp
+
+        first_h2_block_id = None
+        last_inserted_block_id = None
+        entry_container_block_id = None
+
+        if continue_active_entry:
+            if ctx is None or not ctx.active_entry_container_block_id:
+                raise RuntimeError("Missing entry container for merge append")
+            append_target_id = ctx.active_entry_container_block_id
+            first_h2_block_id, last_inserted_block_id, _ = _append_in_chunks(
+                parent_id=append_target_id,
+                block_list=blocks,
+                branch_name="APPEND_EXISTING",
+                include_heading=False,
+                after_block_id=None,
+                fail_on_empty=True,
+            )
+            entry_container_block_id = ctx.active_entry_container_block_id
         else:
+            append_target_id = self.resolve_append_parent_id(ctx)
+            after_id = None
             try:
                 after_id = self.notion.find_first_h1_id(self.page_id)
                 if not after_id:
@@ -759,22 +891,66 @@ class Pipeline:
                 after_id = None
                 log(f"Could not resolve insert-after; fallback to append: {repr(e)}")
 
-        first_h2_block_id = None
-        chunk = 60
-        for i in range(0, len(blocks), chunk):
-            chunk_blocks = blocks[i:i + chunk]
-            resp = self.notion.append_children(append_target_id, chunk_blocks, after_block_id=after_id)
-            if first_h2_block_id is None:
-                first_h2_block_id = extract_first_h2_block_id_from_append_response(resp, chunk_blocks)
+            heading_idx = next((i for i, b in enumerate(blocks) if b.get("type") == "heading_2"), None)
+            content_blocks = blocks
+            if heading_idx is not None:
+                heading_block = blocks[heading_idx]
+                content_blocks = [b for i, b in enumerate(blocks) if i != heading_idx]
+            else:
+                if not blocks:
+                    raise RuntimeError("Append branch produced empty blocks")
+                heading_block = blocks[0]
+                content_blocks = blocks[1:]
+            container_block = {
+                "object": "block",
+                "type": "paragraph",
+                "paragraph": {
+                    "rich_text": [{"type": "text", "text": {"content": " "}}],
+                },
+            }
+            first_h2_block_id, _, heading_resp = _append_in_chunks(
+                parent_id=append_target_id,
+                block_list=[heading_block],
+                branch_name="NEW_ENTRY",
+                include_heading=True,
+                after_block_id=after_id,
+                fail_on_empty=False,
+            )
+            if not first_h2_block_id:
+                first_h2_block_id = extract_first_block_id_by_type_from_append_response(
+                    heading_resp or {},
+                    [heading_block],
+                    "heading_2",
+                ) or ((heading_resp or {}).get("results", [{}])[0].get("id"))
 
-            # Update after_id so the next chunk is inserted directly after the chunk we just inserted.
-            results = (resp or {}).get("results", []) or []
-            if results:
-                first_new_id = results[0].get("id")
-                if first_new_id:
-                    after_id = first_new_id
+            _, _, container_resp = _append_in_chunks(
+                parent_id=append_target_id,
+                block_list=[container_block],
+                branch_name="NEW_ENTRY_CONTAINER",
+                include_heading=False,
+                after_block_id=first_h2_block_id,
+                fail_on_empty=False,
+            )
+            entry_container_block_id = extract_first_block_id_by_type_from_append_response(
+                container_resp or {},
+                [container_block],
+                "paragraph",
+            ) or ((container_resp or {}).get("results", [{}])[0].get("id"))
+            if not entry_container_block_id:
+                raise RuntimeError("Could not resolve entry container block id")
 
-            time.sleep(0.1)
+            log(
+                f"Entry anchor created: h2_id={first_h2_block_id} "
+                f"container_id={entry_container_block_id}"
+            )
+            _, last_inserted_block_id, _ = _append_in_chunks(
+                parent_id=entry_container_block_id,
+                block_list=content_blocks,
+                branch_name="NEW_ENTRY_CONTENT",
+                include_heading=False,
+                after_block_id=None,
+                fail_on_empty=False,
+            )
 
         section_title = first_h2_section_title(blocks)
         effective_notify_title = section_title
@@ -806,10 +982,17 @@ class Pipeline:
                     ctx.active_entry_block_id = first_h2_block_id
                 else:
                     ctx.active_entry_block_id = None
+                ctx.active_entry_container_block_id = entry_container_block_id
+                if last_inserted_block_id:
+                    ctx.active_after_block_id = last_inserted_block_id
+                else:
+                    ctx.active_after_block_id = ctx.active_entry_block_id
                 if note_url:
                     ctx.active_entry_url = note_url
                 else:
                     ctx.active_entry_url = None
+            elif continue_active_entry and last_inserted_block_id:
+                ctx.active_after_block_id = last_inserted_block_id
         try:
             notify_processed_image(
                 effective_notify_title,
@@ -859,6 +1042,8 @@ class FolderHandler(FileSystemEventHandler):
             return
 
         with self._batch_lock:
+            # Debounce near-simultaneous arrivals so they are processed in one batch.
+            time.sleep(WATCH_BATCH_DEBOUNCE_SECS)
             pending = list_pending_images(self.watch)
             if not pending:
                 return

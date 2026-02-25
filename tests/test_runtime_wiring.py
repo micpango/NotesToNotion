@@ -25,9 +25,16 @@ def test_pipeline_process_uses_build_notion_blocks(monkeypatch, tmp_path: Path):
     # Capture calls to build_notion_blocks
     called = {"ok": False, "args": None}
 
-    def fake_build(parsed, filename, image_upload_id, now):
+    def fake_build(parsed, filename, image_upload_id, now, include_entry_heading=True, entry_title_override=None):
         called["ok"] = True
-        called["args"] = (parsed, filename, image_upload_id, now)
+        called["args"] = (
+            parsed,
+            filename,
+            image_upload_id,
+            now,
+            include_entry_heading,
+            entry_title_override,
+        )
         return [{"object": "block", "type": "paragraph", "paragraph": {"rich_text": [{"type": "text", "text": {"content": "hi"}}]}}]
 
     monkeypatch.setattr(appmod, "build_notion_blocks", fake_build)
@@ -77,10 +84,12 @@ def test_pipeline_process_uses_build_notion_blocks(monkeypatch, tmp_path: Path):
 
     # Assert: wiring happened
     assert called["ok"] is True
-    parsed, filename, image_upload_id, now = called["args"]
+    parsed, filename, image_upload_id, now, include_entry_heading, entry_title_override = called["args"]
     assert filename == "IMG_TEST.HEIC"
     assert image_upload_id == "UPLOAD123"
     assert isinstance(now, datetime)
+    assert include_entry_heading is True
+    assert entry_title_override == "Handwritten notes"
 
     # And we appended something to Notion with after="H1BLOCK"
     assert len(p.notion.appended) >= 1
@@ -111,7 +120,7 @@ def test_folder_on_created_triggers_notify_on_success(monkeypatch, tmp_path: Pat
     monkeypatch.setattr(
         appmod,
         "build_notion_blocks",
-        lambda parsed, filename, image_upload_id, now: [
+        lambda parsed, filename, image_upload_id, now, include_entry_heading=True, entry_title_override=None: [
             {
                 "object": "block",
                 "type": "heading_2",
@@ -203,7 +212,7 @@ def test_pipeline_process_records_usage_event(monkeypatch, tmp_path: Path):
     monkeypatch.setattr(
         appmod,
         "build_notion_blocks",
-        lambda parsed, filename, image_upload_id, now: [
+        lambda parsed, filename, image_upload_id, now, include_entry_heading=True, entry_title_override=None: [
             {
                 "object": "block",
                 "type": "heading_2",
