@@ -1,0 +1,251 @@
+[
+  {
+    "heading_2": {
+      "rich_text": [
+        {
+          "mention": {
+            "date": {
+              "start": "<DATE_MENTION>"
+            },
+            "type": "date"
+          },
+          "type": "mention"
+        },
+        {
+          "text": {
+            "content": " — Overridden Session"
+          },
+          "type": "text"
+        }
+      ]
+    },
+    "object": "block",
+    "type": "heading_2"
+  },
+  {
+    "image": {
+      "caption": [
+        {
+          "text": {
+            "content": "Source image: IMG_9999.HEIC"
+          },
+          "type": "text"
+        }
+      ],
+      "file_upload": {
+        "id": "UPLOAD-ABC"
+      },
+      "type": "file_upload"
+    },
+    "object": "block",
+    "type": "image"
+  },
+  {
+    "divider": {},
+    "object": "block",
+    "type": "divider"
+  },
+  {
+    "heading_3": {
+      "rich_text": [
+        {
+          "text": {
+            "content": "General"
+          },
+          "type": "text"
+        }
+      ]
+    },
+    "object": "block",
+    "type": "heading_3"
+  },
+  {
+    "object": "block",
+    "to_do": {
+      "checked": false,
+      "rich_text": [
+        {
+          "text": {
+            "content": "Plan kickoff"
+          },
+          "type": "text"
+        }
+      ]
+    },
+    "type": "to_do"
+  },
+  {
+    "object": "block",
+    "to_do": {
+      "checked": false,
+      "rich_text": [
+        {
+          "text": {
+            "content": "open task from note"
+          },
+          "type": "text"
+        }
+      ]
+    },
+    "type": "to_do"
+  },
+  {
+    "object": "block",
+    "to_do": {
+      "checked": true,
+      "rich_text": [
+        {
+          "text": {
+            "content": "done task from note"
+          },
+          "type": "text"
+        }
+      ]
+    },
+    "type": "to_do"
+  },
+  {
+    "bulleted_list_item": {
+      "children": [
+        {
+          "bulleted_list_item": {
+            "rich_text": [
+              {
+                "text": {
+                  "content": "child bullet"
+                },
+                "type": "text"
+              }
+            ]
+          },
+          "object": "block",
+          "type": "bulleted_list_item"
+        }
+      ],
+      "rich_text": [
+        {
+          "text": {
+            "content": "top bullet"
+          },
+          "type": "text"
+        }
+      ]
+    },
+    "object": "block",
+    "type": "bulleted_list_item"
+  },
+  {
+    "numbered_list_item": {
+      "children": [
+        {
+          "numbered_list_item": {
+            "rich_text": [
+              {
+                "text": {
+                  "content": "nested numbered"
+                },
+                "type": "text"
+              }
+            ]
+          },
+          "object": "block",
+          "type": "numbered_list_item"
+        }
+      ],
+      "rich_text": [
+        {
+          "text": {
+            "content": "numbered item"
+          },
+          "type": "text"
+        }
+      ]
+    },
+    "object": "block",
+    "type": "numbered_list_item"
+  },
+  {
+    "bulleted_list_item": {
+      "rich_text": [
+        {
+          "text": {
+            "content": "❓ How do we wrap this up?"
+          },
+          "type": "text"
+        }
+      ]
+    },
+    "object": "block",
+    "type": "bulleted_list_item"
+  },
+  {
+    "bulleted_list_item": {
+      "rich_text": [
+        {
+          "text": {
+            "content": "❓ note question"
+          },
+          "type": "text"
+        }
+      ]
+    },
+    "object": "block",
+    "type": "bulleted_list_item"
+  },
+  {
+    "heading_2": {
+      "rich_text": [
+        {
+          "mention": {
+            "date": {
+              "start": "<DATE_MENTION>"
+            },
+            "type": "date"
+          },
+          "type": "mention"
+        },
+        {
+          "text": {
+            "content": " — Sprint Beta"
+          },
+          "type": "text"
+        }
+      ]
+    },
+    "object": "block",
+    "type": "heading_2"
+  },
+  {
+    "divider": {},
+    "object": "block",
+    "type": "divider"
+  },
+  {
+    "heading_3": {
+      "rich_text": [
+        {
+          "text": {
+            "content": "General"
+          },
+          "type": "text"
+        }
+      ]
+    },
+    "object": "block",
+    "type": "heading_3"
+  },
+  {
+    "bulleted_list_item": {
+      "rich_text": [
+        {
+          "text": {
+            "content": "beta plain note"
+          },
+          "type": "text"
+        }
+      ]
+    },
+    "object": "block",
+    "type": "bulleted_list_item"
+  }
+]

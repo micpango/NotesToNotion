@@ -1,0 +1,165 @@
+[
+  {
+    "after_block_id": "H1BLOCK",
+    "block_id": "PAGEID",
+    "children": [
+      {
+        "heading_2": {
+          "rich_text": [
+            {
+              "mention": {
+                "date": {
+                  "start": "<DATE_MENTION>"
+                },
+                "type": "date"
+              },
+              "type": "mention"
+            },
+            {
+              "text": {
+                "content": " — Team Sync"
+              },
+              "type": "text"
+            }
+          ]
+        },
+        "object": "block",
+        "type": "heading_2"
+      }
+    ]
+  },
+  {
+    "after_block_id": "id-1",
+    "block_id": "PAGEID",
+    "children": [
+      {
+        "object": "block",
+        "paragraph": {
+          "rich_text": [
+            {
+              "text": {
+                "content": " "
+              },
+              "type": "text"
+            }
+          ]
+        },
+        "type": "paragraph"
+      }
+    ]
+  },
+  {
+    "after_block_id": null,
+    "block_id": "id-2",
+    "children": [
+      {
+        "image": {
+          "caption": [
+            {
+              "text": {
+                "content": "Source image: a.png"
+              },
+              "type": "text"
+            }
+          ],
+          "file_upload": {
+            "id": "UPLOAD123"
+          },
+          "type": "file_upload"
+        },
+        "object": "block",
+        "type": "image"
+      },
+      {
+        "divider": {},
+        "object": "block",
+        "type": "divider"
+      },
+      {
+        "heading_3": {
+          "rich_text": [
+            {
+              "text": {
+                "content": "General"
+              },
+              "type": "text"
+            }
+          ]
+        },
+        "object": "block",
+        "type": "heading_3"
+      },
+      {
+        "bulleted_list_item": {
+          "rich_text": [
+            {
+              "text": {
+                "content": "first note"
+              },
+              "type": "text"
+            }
+          ]
+        },
+        "object": "block",
+        "type": "bulleted_list_item"
+      }
+    ]
+  },
+  {
+    "after_block_id": null,
+    "block_id": "id-2",
+    "children": [
+      {
+        "image": {
+          "caption": [
+            {
+              "text": {
+                "content": "Source image: b.png"
+              },
+              "type": "text"
+            }
+          ],
+          "file_upload": {
+            "id": "UPLOAD123"
+          },
+          "type": "file_upload"
+        },
+        "object": "block",
+        "type": "image"
+      },
+      {
+        "divider": {},
+        "object": "block",
+        "type": "divider"
+      },
+      {
+        "heading_3": {
+          "rich_text": [
+            {
+              "text": {
+                "content": "General"
+              },
+              "type": "text"
+            }
+          ]
+        },
+        "object": "block",
+        "type": "heading_3"
+      },
+      {
+        "bulleted_list_item": {
+          "rich_text": [
+            {
+              "text": {
+                "content": "second note"
+              },
+              "type": "text"
+            }
+          ]
+        },
+        "object": "block",
+        "type": "bulleted_list_item"
+      }
+    ]
+  }
+]

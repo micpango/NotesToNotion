@@ -6,7 +6,7 @@ on:
 
 jobs:
   unit:
-    runs-on: ubuntu-latest
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
 
@@ -21,6 +21,12 @@ jobs:
           pip install -r requirements.txt
           pip install -r requirements-dev.txt
 
-      - name: Run tests
+      - name: Run tests with coverage gate
         run: |
-          pytest
+          pytest \
+            --cov=menubar_notes_to_notion \
+            --cov=notion_format \
+            --cov=usage_tracker \
+            --cov=prompt_contract \
+            --cov-report=term-missing \
+            --cov-fail-under=75
