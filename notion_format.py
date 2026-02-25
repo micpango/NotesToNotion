@@ -8,9 +8,10 @@ from typing import Any, Dict, List, Optional
 # Prefixes we may get back from the model even though the content is already categorized.
 # We strip these defensively in the formatter so output is clean/deterministic.
 _PREFIX_RE = re.compile(r"^\s*([.\-xX\?])\s+")
-_NUM_RE = re.compile(r"^\s*(\d+)\.\s+(.*)")
 _HASH_TITLE_RE = re.compile(r"^\s*#\s*(.+)\s*$")
 _BULLET_TASK_PREFIXES = ("•", "·", "∙", "◦", "○")
+_BULLET_INDENT_RE = re.compile(r"^\s*((?:-\s*)+)\s+(.*)$")
+_NUMBERED_INDENT_RE = re.compile(r"^\s*(\d+(?:\.\d+)*\.?)\s+(.*)$")
 
 
 def date_mention_rich_text(dt: datetime):
@@ -34,6 +35,34 @@ def strip_known_prefix(s: str) -> str:
     s = (s or "").strip()
     s = _PREFIX_RE.sub("", s)
     return s.strip()
+
+
+def parse_bullet_indent(text: str) -> tuple[Optional[int], str]:
+    s = (text or "").strip()
+    m = _BULLET_INDENT_RE.match(s)
+    if not m:
+        return (None, s)
+    raw = (m.group(1) or "")
+    clean = (m.group(2) or "").strip()
+    if not clean:
+        return (None, "")
+    dash_count = raw.count("-")
+    return (max(dash_count - 1, 0), clean)
+
+
+def parse_numbered_indent(text: str) -> tuple[Optional[int], str]:
+    s = (text or "").strip()
+    m = _NUMBERED_INDENT_RE.match(s)
+    if not m:
+        return (None, s)
+    raw = (m.group(1) or "").rstrip(".")
+    clean = (m.group(2) or "").strip()
+    if not raw or not clean:
+        return (None, "")
+    parts = raw.split(".")
+    if not all(p.isdigit() for p in parts):
+        return (None, s)
+    return (max(len(parts) - 1, 0), clean)
 
 
 def _is_hash_header_line(line: str) -> Optional[str]:
@@ -103,20 +132,22 @@ def _split_prefix_kind(raw_line: str) -> tuple[str, str]:
     if s.startswith("? "):
         q = s[2:].strip()
         # if question accidentally includes numbering, strip it
-        m = _NUM_RE.match(q)
-        if m:
-            q = (m.group(2) or "").strip()
+        level, q_clean = parse_numbered_indent(q)
+        if level is not None:
+            q = q_clean
         return ("question", q)
 
     if s.startswith("?"):
         q = s[1:].strip()
-        m = _NUM_RE.match(q)
-        if m:
-            q = (m.group(2) or "").strip()
+        level, q_clean = parse_numbered_indent(q)
+        if level is not None:
+            q = q_clean
         return ("question", q)
 
-    if s.startswith("- "):
-        return ("note", s[2:].strip())
+    bullet_level, _ = parse_bullet_indent(s)
+    if bullet_level is not None:
+        # Keep full prefix for deterministic nested list rendering.
+        return ("note", s)
     if s.startswith("-"):
         return ("note", s[1:].strip())
 
@@ -143,6 +174,79 @@ def build_notion_blocks(
     No network, no OpenAI, no Notion. Unit-test friendly.
     """
     blocks: List[Dict[str, Any]] = []
+
+    def _make_list_item(kind: str, text: str) -> Dict[str, Any]:
+        block_type = "numbered_list_item" if kind == "numbered" else "bulleted_list_item"
+        return {
+            "object": "block",
+            "type": block_type,
+            block_type: {"rich_text": rt_text(text)},
+        }
+
+    def _build_nested_note_blocks(notes: List[str]) -> List[Dict[str, Any]]:
+        list_blocks: List[Dict[str, Any]] = []
+        stack: List[Dict[str, Any]] = []
+        previous_kind: Optional[str] = None
+        previous_level = 0
+
+        for raw_note in notes:
+            note = (raw_note or "").strip()
+            if not note:
+                continue
+
+            bullet_level, bullet_text = parse_bullet_indent(note)
+            number_level, number_text = parse_numbered_indent(note)
+
+            if bullet_level is not None:
+                kind = "bullet"
+                level = bullet_level
+                text = bullet_text
+            elif number_level is not None:
+                kind = "numbered"
+                level = number_level
+                text = number_text
+            else:
+                kind = "bullet"
+                level = 0
+                text = note
+
+            if not text:
+                continue
+
+            # Reset when switching list kind.
+            if previous_kind is not None and kind != previous_kind:
+                stack = []
+                previous_level = 0
+
+            # Clamp jumps (e.g. level 0 -> level 2 becomes level 1).
+            max_next = previous_level + 1
+            if level > max_next:
+                level = max_next
+            if level < 0:
+                level = 0
+
+            # Trim stack before insert so stale deeper parents are never reused.
+            stack = stack[:level]
+            if level > len(stack):
+                level = len(stack)
+                stack = stack[:level]
+
+            block = _make_list_item(kind, text)
+            if level == 0:
+                list_blocks.append(block)
+            else:
+                parent = stack[level - 1]
+                parent_type = str(parent.get("type", ""))
+                parent[parent_type].setdefault("children", []).append(block)
+
+            if len(stack) == level:
+                stack.append(block)
+            else:
+                stack[level] = block
+            previous_kind = kind
+            previous_level = level
+
+        return list_blocks
 
     topics = parsed.get("topics") or [{"title": "General", "tasks": [], "notes": [], "questions": []}]
 
@@ -294,27 +398,8 @@ def build_notion_blocks(
                     }
                 })
 
-            # Notes: numbered list if "1. ..." else bullets
-            for note in (t.get("notes") or []):
-                note = (note or "").strip()
-                if not note:
-                    continue
-
-                m = _NUM_RE.match(note)
-                if m:
-                    text = (m.group(2) or "").strip()
-                    if text:
-                        blocks.append({
-                            "object": "block",
-                            "type": "numbered_list_item",
-                            "numbered_list_item": {"rich_text": rt_text(text)}
-                        })
-                else:
-                    blocks.append({
-                        "object": "block",
-                        "type": "bulleted_list_item",
-                        "bulleted_list_item": {"rich_text": rt_text(note)}
-                    })
+            # Notes: nested list rendering based only on explicit prefix rules.
+            blocks.extend(_build_nested_note_blocks(t.get("notes") or []))
 
             # Questions
             for q in (t.get("questions") or []):
